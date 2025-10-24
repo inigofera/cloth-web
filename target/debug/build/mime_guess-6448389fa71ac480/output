@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=C:\src\cloth-web\target\debug\build\mime_guess-6448389fa71ac480\out\mime_types_generated.rs
