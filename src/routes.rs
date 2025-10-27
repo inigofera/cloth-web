@@ -4,7 +4,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use sqlx::FromRow;
 
-use crate::{storage::SupabaseStorage, AppState};
+use crate::AppState;
 
 #[derive(Serialize)]
 pub struct User {
@@ -17,6 +17,29 @@ pub async fn list_users(State(state): State<Arc<AppState>>) -> Json<Vec<User>> {
         .fetch_all(&state.db)
         .await
         .unwrap();
+
+    Json(rows)
+}
+
+#[derive(Serialize, FromRow)]
+pub struct ColumnInfo {
+    pub table_name: String,
+    pub column_name: String,
+    pub data_type: String,
+}
+
+pub async fn list_tables(State(state): State<Arc<AppState>>) -> Json<Vec<ColumnInfo>> {
+    let rows = sqlx::query_as::<_, ColumnInfo>(
+        "SELECT t.table_name, c.column_name, c.data_type
+         FROM information_schema.tables t
+         JOIN information_schema.columns c 
+           ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+         WHERE t.table_schema = 'public'
+         ORDER BY t.table_name, c.ordinal_position"
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
 
     Json(rows)
 }

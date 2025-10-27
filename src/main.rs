@@ -9,7 +9,7 @@ use std::sync::Arc;
 use dotenv::dotenv;
 use db::connect_db;
 use storage::SupabaseStorage;
-use routes::{list_users, upload_file};
+use routes::{list_users, upload_file, list_tables};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,6 +29,7 @@ async fn main() {
     let app = Router::new()
         .route("/users", get(list_users))
         .route("/upload", post(upload_file))
+        .route("/tables", get(list_tables))
         .with_state(state);
 
     println!("🚀 running on http://localhost:3000");
