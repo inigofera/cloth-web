@@ -9,7 +9,7 @@ use std::sync::Arc;
 use dotenv::dotenv;
 use db::connect_db;
 use storage::SupabaseStorage;
-use routes::{list_users, upload_file, list_tables};
+use routes::{list_users, upload_file, list_tables, get_table_rows, insert_table_row, delete_table_row, update_table_row};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +30,9 @@ async fn main() {
         .route("/users", get(list_users))
         .route("/upload", post(upload_file))
         .route("/tables", get(list_tables))
+        .route("/db/:table", get(get_table_rows).post(insert_table_row))
+        .route("/db/:table/:id", axum::routing::delete(delete_table_row))
+        .route("/db/:table/:id", axum::routing::patch(update_table_row))
         .with_state(state);
 
     println!("🚀 running on http://localhost:3000");
