@@ -148,7 +148,7 @@ pub async fn update_table_row(
     };
 
     // Build dynamic column list from provided keys (excluding id)
-    let mut cols: Vec<String> = obj
+    let cols: Vec<String> = obj
         .keys()
         .filter(|k| k.as_str() != "id")
         .map(|k| k.replace('"', "\\\""))
