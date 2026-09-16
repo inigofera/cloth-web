@@ -1,7 +1,15 @@
-import type { ColumnInfo, JsonValue } from './types';
+import type { ColumnInfo, CreateOutfitPayload, JsonValue, Outfit } from './types';
 import { supabase } from '../lib/supabase';
 
 const API_BASE = '/api';
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
+const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_BUCKET as string;
+
+export function imageUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (path.startsWith('http')) return path;
+  return `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+}
 
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const { data } = await supabase.auth.getSession();
@@ -37,5 +45,10 @@ export const api = {
     const form = new FormData();
     form.append('file', file);
     return fetchJson<string>(`${API_BASE}/upload`, { method: 'POST', body: form });
-  }
+  },
+  listOutfits: () => fetchJson<Outfit[]>(`${API_BASE}/outfits`),
+  createOutfit: (data: CreateOutfitPayload) => fetchJson<Outfit>(
+    `${API_BASE}/outfits`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  )
 };

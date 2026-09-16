@@ -1,5 +1,5 @@
 use axum::{Json, extract::{Multipart, Path, State}, http::StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use sqlx::{FromRow, Row};
@@ -209,6 +209,92 @@ pub async fn update_table_row(
         .unwrap();
 
     Ok(Json(row.map(|t| t.0)))
+}
+
+#[derive(Deserialize)]
+pub struct CreateOutfitRequest {
+    pub date: String,
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub item_ids: Vec<String>,
+}
+
+const OUTFITS_WITH_ITEMS_SQL: &str =
+    "SELECT to_jsonb(o) || jsonb_build_object('items', COALESCE((\n\
+     SELECT jsonb_agg(to_jsonb(ci) ORDER BY ci.name)\n\
+     FROM \"outfit-items\" oi\n\
+     JOIN \"clothing-items\" ci ON ci.id = oi.clothing_item_id\n\
+     WHERE oi.outfit_id = o.id\n\
+     ), '[]'::jsonb)) AS row\n\
+     FROM outfits o\n\
+     WHERE o.user_id = $1";
+
+pub async fn list_outfits(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Json<Vec<JsonValue>> {
+    let sql = format!("{OUTFITS_WITH_ITEMS_SQL} ORDER BY o.date");
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+
+    Json(rows.into_iter().map(|r| r.get::<JsonValue, _>("row")).collect())
+}
+
+pub async fn create_outfit(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Json(req): Json<CreateOutfitRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let row: (JsonValue,) = sqlx::query_as(
+        "INSERT INTO outfits (user_id, date, notes, is_active) VALUES ($1, $2::timestamptz, $3, true) RETURNING to_jsonb(outfits) AS row",
+    )
+    .bind(user_id)
+    .bind(&req.date)
+    .bind(&req.notes)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create outfit: {e}")))?;
+
+    let outfit = row.0;
+    let outfit_id = outfit
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    for item_id in &req.item_ids {
+        sqlx::query(
+            "INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES ($1::uuid, $2::uuid)",
+        )
+        .bind(&outfit_id)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not link item: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let sql = format!("{OUTFITS_WITH_ITEMS_SQL} AND o.id::text = $2");
+    let created: (JsonValue,) = sqlx::query_as(&sql)
+        .bind(user_id)
+        .bind(&outfit_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+    Ok(Json(created.0))
 }
 
 pub async fn upload_file(
