@@ -1,10 +1,5 @@
 export type UUID = string;
 
-export interface User {
-  id: UUID;
-  email: string | null;
-}
-
 export interface ColumnInfo {
   table_name: string;
   column_name: string;

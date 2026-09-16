@@ -1,34 +1,48 @@
 <template>
   <div id="app">
     <h1>Cloth Web Frontend</h1>
-    <p>Vite + TypeScript + Vue is running.</p>
-    
-    <div v-if="loading" class="loading">Loading tables...</div>
-    
-    <div v-if="tablesError" class="error">
-      <p>API error: {{ tablesError }}</p>
-    </div>
-    
-    <div v-else-if="tableGroups.length > 0" class="tables-container">
-      <TableView
-        v-for="group in tableGroups"
-        :key="group.tableName"
-        :table-name="group.tableName"
-        :columns="group.columns"
-      />
-    </div>
-    
-    <div v-else-if="!loading && tableGroups.length === 0" class="empty">
-      No tables found
-    </div>
+
+    <div v-if="!ready" class="loading">Loading…</div>
+
+    <LoginForm v-else-if="!session" />
+
+    <template v-else>
+      <div class="topbar">
+        <span class="who">{{ user?.email }}</span>
+        <button class="signout" @click="signOut">Sign out</button>
+      </div>
+
+      <div v-if="loading" class="loading">Loading tables...</div>
+
+      <div v-if="tablesError" class="error">
+        <p>API error: {{ tablesError }}</p>
+      </div>
+
+      <div v-else-if="tableGroups.length > 0" class="tables-container">
+        <TableView
+          v-for="group in tableGroups"
+          :key="group.tableName"
+          :table-name="group.tableName"
+          :columns="group.columns"
+        />
+      </div>
+
+      <div v-else-if="!loading && tableGroups.length === 0" class="empty">
+        No tables found
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { api } from './api/client';
+import { useAuth } from './lib/auth';
 import type { ColumnInfo } from './api/types';
 import TableView from './components/TableView.vue';
+import LoginForm from './components/LoginForm.vue';
+
+const { session, user, ready, signOut } = useAuth();
 
 interface TableGroup {
   tableName: string;
@@ -77,6 +91,27 @@ onMounted(async () => {
 
 h1 {
   margin-bottom: 0.5rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.topbar .who {
+  color: #555;
+}
+
+.topbar .signout {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
 }
 
 .tables-container {

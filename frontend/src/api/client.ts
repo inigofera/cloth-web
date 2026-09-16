@@ -1,9 +1,16 @@
-import type { User, ColumnInfo, JsonValue } from './types';
+import type { ColumnInfo, JsonValue } from './types';
+import { supabase } from '../lib/supabase';
 
 const API_BASE = '/api';
 
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const res = await fetch(input, init);
+  const { data } = await supabase.auth.getSession();
+  const headers = new Headers(init?.headers);
+  if (data.session) {
+    headers.set('Authorization', `Bearer ${data.session.access_token}`);
+  }
+
+  const res = await fetch(input, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
@@ -12,7 +19,6 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
 }
 
 export const api = {
-  getUsers: () => fetchJson<User[]>(`${API_BASE}/users`),
   listTables: () => fetchJson<ColumnInfo[]>(`${API_BASE}/tables`),
   getTableRows: (table: string) => fetchJson<JsonValue[]>(`${API_BASE}/db/${encodeURIComponent(table)}`),
   insertTableRow: (table: string, data: JsonValue) => fetchJson<JsonValue | null>(
@@ -33,5 +39,3 @@ export const api = {
     return fetchJson<string>(`${API_BASE}/upload`, { method: 'POST', body: form });
   }
 };
-
-

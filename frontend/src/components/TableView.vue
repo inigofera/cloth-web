@@ -43,7 +43,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { api } from '../api/client';
-import type { ColumnInfo, JsonValue } from '../api/types';
+import type { ColumnInfo } from '../api/types';
 
 interface Props {
   tableName: string;
@@ -54,7 +54,7 @@ const props = defineProps<Props>();
 
 const loading = ref(true);
 const error = ref<string | null>(null);
-const rows = ref<JsonValue[]>([]);
+const rows = ref<Record<string, unknown>[]>([]);
 
 const displayedColumns = computed(() => {
   return props.columns.map(col => col.column_name);
@@ -79,7 +79,7 @@ onMounted(async () => {
     loading.value = true;
     error.value = null;
     const data = await api.getTableRows(props.tableName);
-    rows.value = Array.isArray(data) ? data : [];
+    rows.value = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
   } catch (err) {
     error.value = String(err);
   } finally {
