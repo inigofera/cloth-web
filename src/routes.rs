@@ -54,6 +54,34 @@ async fn table_has_user_id(pool: &sqlx::Pool<sqlx::Postgres>, table: &str) -> an
     Ok(exists)
 }
 
+async fn table_has_column(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    table: &str,
+    column: &str,
+) -> anyhow::Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)"
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
+async fn table_column_names(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let cols = sqlx::query_scalar::<_, String>(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position"
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(cols)
+}
+
 fn quote_ident(table: &str) -> String {
     table.replace('"', "\"")
 }
@@ -114,10 +142,25 @@ pub async fn insert_table_row(
     }
 
     let quoted_table = quote_ident(&table);
+    let columns = table_column_names(&state.db, &table).await.unwrap_or_default();
+    let select_list = if columns.is_empty() {
+        "r.*".to_string()
+    } else {
+        columns
+            .iter()
+            .map(|c| match c.as_str() {
+                "created_at" | "updated_at" => format!("COALESCE(r.\"{}\", now()) AS \"{}\"", c, c),
+                _ => format!("r.\"{}\"", c),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     let cte = format!(
-        "WITH inserted AS (\n  INSERT INTO public.\"{}\"\n  SELECT * FROM json_populate_record(NULL::public.\"{}\", $1::json)\n  RETURNING *\n)\nSELECT to_jsonb(inserted.*) AS row FROM inserted",
+        "WITH r AS (\n  SELECT * FROM json_populate_record(NULL::public.\"{}\", $1::json)\n)\n,\ninserted AS (\n  INSERT INTO public.\"{}\"\n  SELECT {} FROM r\n  RETURNING *\n)\nSELECT to_jsonb(inserted.*) AS row FROM inserted",
         quoted_table,
         quoted_table,
+        select_list,
     );
 
     let row: Option<(JsonValue,)> = sqlx::query_as(&cte)
@@ -187,11 +230,15 @@ pub async fn update_table_row(
     }
 
     let quoted_table = quote_ident(&table);
-    let set_cols = cols
+    let mut set_parts: Vec<String> = cols
         .iter()
         .map(|c| format!("\"{}\" = r.\"{}\"", c, c))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
+    let has_updated_at = table_has_column(&state.db, &table, "updated_at").await.unwrap_or(false);
+    if has_updated_at && !cols.iter().any(|c| c == "updated_at") {
+        set_parts.push("\"updated_at\" = now()".to_string());
+    }
+    let set_cols = set_parts.join(", ");
 
     let sql = format!(
         "WITH r AS (\n  SELECT * FROM json_populate_record(NULL::public.\"{}\", $2::json)\n)\nUPDATE public.\"{}\" AS t\nSET {}\nFROM r\nWHERE t.id::text = $1 AND t.user_id = $3\nRETURNING to_jsonb(t) AS row",
@@ -209,6 +256,103 @@ pub async fn update_table_row(
         .unwrap();
 
     Ok(Json(row.map(|t| t.0)))
+}
+
+#[derive(Deserialize)]
+pub struct CreateColorRequest {
+    pub id: String,
+    pub hex_value: Option<String>,
+}
+
+pub async fn create_color(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Json(req): Json<CreateColorRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let id = req.id.trim().to_lowercase();
+    if id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "color id is required".into()));
+    }
+
+    let hex_value = match &req.hex_value {
+        Some(h) if !h.trim().is_empty() => {
+            let h = h.trim();
+            if h.len() != 7 || !h.starts_with('#') || !h[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err((StatusCode::BAD_REQUEST, "hex_value must be in #RRGGBB format".into()));
+            }
+            Some(h.to_string())
+        }
+        _ => None,
+    };
+
+    let row: (JsonValue,) = sqlx::query_as(
+        "INSERT INTO colors (id, hex_value) VALUES ($1, $2) \
+         ON CONFLICT (id) DO UPDATE SET id = colors.id \
+         RETURNING to_jsonb(colors) AS row",
+    )
+    .bind(&id)
+    .bind(&hex_value)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create color: {e}")))?;
+
+    Ok(Json(row.0))
+}
+
+#[derive(Deserialize)]
+pub struct CreateCategoryRequest {
+    pub name: String,
+}
+
+pub async fn create_category(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Json(req): Json<CreateCategoryRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+
+    let row: (JsonValue,) = sqlx::query_as(
+        r#"INSERT INTO "clothing-categories" (name) VALUES ($1)
+           RETURNING to_jsonb("clothing-categories") AS row"#,
+    )
+    .bind(name)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create category: {e}")))?;
+
+    Ok(Json(row.0))
+}
+
+#[derive(Deserialize)]
+pub struct CreateSubcategoryRequest {
+    pub name: String,
+    pub category_id: i64,
+}
+
+pub async fn create_subcategory(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Json(req): Json<CreateSubcategoryRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+
+    let row: (JsonValue,) = sqlx::query_as(
+        r#"INSERT INTO "clothing-subcategories" (name, category_id) VALUES ($1, $2)
+           RETURNING to_jsonb("clothing-subcategories") AS row"#,
+    )
+    .bind(name)
+    .bind(req.category_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create subcategory: {e}")))?;
+
+    Ok(Json(row.0))
 }
 
 #[derive(Deserialize)]
@@ -255,7 +399,7 @@ pub async fn create_outfit(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let row: (JsonValue,) = sqlx::query_as(
-        "INSERT INTO outfits (user_id, date, notes, is_active) VALUES ($1, $2::timestamptz, $3, true) RETURNING to_jsonb(outfits) AS row",
+        "INSERT INTO outfits (user_id, date, notes, is_active, created_at, updated_at) VALUES ($1, $2::timestamptz, $3, true, now(), now()) RETURNING to_jsonb(outfits) AS row",
     )
     .bind(user_id)
     .bind(&req.date)
