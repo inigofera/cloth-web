@@ -40,15 +40,16 @@ The goal is to define a stable **v0.1.0 API surface** for versioning, ensuring b
 | `/db/:table` | POST | Insert a new row into a table |
 | `/db/:table/:id` | PATCH | Update an existing row by ID |
 | `/db/:table/:id` | DELETE | Delete a row by ID |
-| `/upload` | POST | Upload a file to Supabase Storage and return public URL |
+| `/upload` | POST | Upload an image (≤ 10 MiB; jpg/jpeg/png/webp/gif) to Supabase Storage under a sanitized, per-user key and return its public URL |
 
 ### Key Architectural Elements
 
 1. **Generic CRUD** — Dynamic table operations using `json_populate_record` for type coercion
 2. **Schema Discovery** — Introspection via `information_schema` to list tables/columns
 3. **File Storage** — Supabase Storage integration with public URL generation
-4. **PostgreSQL Backend** — Using sqlx with Postgres
-5. **UUID-based IDs** — All entities use UUID primary keys
+4. **Upload Sanitization** — client filenames are untrusted input: path components are stripped, unsafe characters replaced, extensions allowlisted (images only), content is magic-byte validated, and objects are stored under `users/{user_id}/{uuid}-{name}` so uploads can never overwrite or collide across users
+5. **PostgreSQL Backend** — Using sqlx with Postgres
+6. **UUID-based IDs** — All entities use UUID primary keys
 
 ### Frontend (Vue 3 + TypeScript)
 

@@ -299,19 +299,52 @@ pub async fn create_outfit(
 
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    AuthUser(user_id): AuthUser,
     mut multipart: Multipart,
-) -> Json<String> {
+) -> Result<Json<String>, (StatusCode, String)> {
     let storage = &state.storage;
 
-    while let Some(field) = multipart.next_field().await.unwrap() {
-        let name = field.file_name().unwrap().to_string();
-        let data = field.bytes().await.unwrap();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid multipart body: {e}")))?
+    {
+        let raw_name = field
+            .file_name()
+            .map(str::to_owned)
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing file name".to_string()))?;
 
-        let _ = storage.upload_file(&name, data.to_vec()).await.unwrap();
-        let url = storage.get_public_url(&name).await;
-        return Json(url);
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not read upload: {e}")))?;
+
+        if data.len() > crate::upload::MAX_UPLOAD_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "file too large: {} bytes (max {})",
+                    data.len(),
+                    crate::upload::MAX_UPLOAD_BYTES
+                ),
+            ));
+        }
+
+        let sanitized = crate::upload::sanitize_filename(&raw_name)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        crate::upload::validate_image_content(&data)
+            .map_err(|e| (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()))?;
+
+        let key = crate::upload::build_storage_key(&user_id, &sanitized);
+
+        storage
+            .upload_file(&key, data.to_vec())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage upload failed: {e}")))?;
+
+        return Ok(Json(storage.get_public_url(&key).await));
     }
 
-    Json("No file uploaded".into())
+    Err((StatusCode::BAD_REQUEST, "no file uploaded".to_string()))
 }

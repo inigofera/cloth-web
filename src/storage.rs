@@ -19,10 +19,11 @@ impl SupabaseStorage {
         }
     }
 
-    pub async fn upload_file(&self, filename: &str, bytes: Vec<u8>) -> anyhow::Result<String> {
+    /// Upload `bytes` to the given object key (e.g. `users/{user_id}/{uuid}-{name}`).
+    pub async fn upload_file(&self, key: &str, bytes: Vec<u8>) -> anyhow::Result<String> {
         let url = format!(
             "{}/storage/v1/object/{}/{}",
-            self.base_url, self.bucket, filename
+            self.base_url, self.bucket, key
         );
 
         let res = self
@@ -41,10 +42,11 @@ impl SupabaseStorage {
         }
     }
 
-    pub async fn get_public_url(&self, filename: &str) -> String {
+    /// Public URL for the given object key.
+    pub async fn get_public_url(&self, key: &str) -> String {
         format!(
             "{}/storage/v1/object/public/{}/{}",
-            self.base_url, self.bucket, filename
+            self.base_url, self.bucket, key
         )
     }
 }

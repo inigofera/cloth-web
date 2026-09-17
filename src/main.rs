@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod storage;
+mod upload;
 mod routes;
 
 use axum::{Router, routing::{get, post}};
