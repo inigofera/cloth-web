@@ -1,31 +1,36 @@
 <template>
   <div id="app">
-    <h1>Cloth Web</h1>
-
     <div v-if="!ready" class="loading">Loading…</div>
 
     <LoginForm v-else-if="!session" />
 
     <template v-else>
-      <div class="topbar">
-        <span class="who">{{ user?.email }}</span>
-        <button class="signout" @click="signOut">Sign out</button>
+      <MdAppBar
+        title="Cloth Web"
+        elevation="1"
+        @nav-click="drawerOpen = !drawerOpen"
+      >
+        <template #actions>
+          <span class="who">{{ user?.email }}</span>
+          <MdButton variant="text" @click="signOut">Sign out</MdButton>
+        </template>
+      </MdAppBar>
+
+      <div class="shell">
+        <MdNavDrawer v-model="activeTab" :open="drawerOpen" :items="navItems">
+          <template #header>
+            <div class="drawer-brand">
+              <span class="drawer-brand__name">Cloth Web</span>
+            </div>
+          </template>
+        </MdNavDrawer>
+
+        <main class="content">
+          <ClothesView v-if="activeTab === 'clothes'" />
+          <OutfitsView v-else-if="activeTab === 'outfits'" />
+          <TablesView v-else-if="activeTab === 'tables'" />
+        </main>
       </div>
-
-      <nav class="tabs">
-        <button
-          v-for="tab in tabs"
-          :key="tab.id"
-          class="tab"
-          :class="{ active: activeTab === tab.id }"
-          @click="activeTab = tab.id"
-        >
-          {{ tab.label }}
-        </button>
-      </nav>
-
-      <OutfitsView v-if="activeTab === 'outfits'" />
-      <TablesView v-else-if="activeTab === 'tables'" />
     </template>
   </div>
 </template>
@@ -33,85 +38,70 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useAuth } from './lib/auth';
+import ClothesView from './components/ClothesView.vue';
 import OutfitsView from './components/OutfitsView.vue';
 import TablesView from './components/TablesView.vue';
 import LoginForm from './components/LoginForm.vue';
+import { MdAppBar, MdNavDrawer, MdButton, type DrawerItem } from './ui';
 
 const { session, user, ready, signOut } = useAuth();
 
-const tabs = [
-  { id: 'outfits', label: 'Outfits' },
-  { id: 'tables', label: 'Tables' }
-] as const;
+const navItems: DrawerItem[] = [
+  { id: 'clothes', label: 'Clothes', icon: 'grid' },
+  { id: 'outfits', label: 'Outfits', icon: 'shirt' },
+  { id: 'tables', label: 'Tables', icon: 'table' },
+];
 
-type TabId = (typeof tabs)[number]['id'];
+type TabId = (typeof navItems)[number]['id'];
 
 const activeTab = ref<TabId>('outfits');
+const drawerOpen = ref(true);
 </script>
 
 <style scoped>
 #app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 2rem;
-}
-
-h1 {
-  margin-bottom: 0.5rem;
-}
-
-.topbar {
   display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 1rem;
-  margin-top: 1rem;
-  font-size: 0.9rem;
-}
-
-.topbar .who {
-  color: #555;
-}
-
-.topbar .signout {
-  padding: 0.35rem 0.75rem;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  margin-top: 1.5rem;
-  border-bottom: 2px solid #ddd;
-}
-
-.tab {
-  padding: 0.5rem 1.25rem;
-  border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  background: none;
-  font-size: 0.95rem;
-  color: #555;
-  cursor: pointer;
-}
-
-.tab:hover {
-  color: #007bff;
-}
-
-.tab.active {
-  color: #007bff;
-  font-weight: 600;
-  border-bottom-color: #007bff;
+  flex-direction: column;
+  height: 100vh;
 }
 
 .loading {
-  color: #666;
-  padding: 1rem;
+  color: var(--md-on-surface-variant);
+  padding: 2rem;
   font-style: italic;
+}
+
+.shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 2rem;
+}
+
+.who {
+  color: var(--md-on-surface-variant);
+  font-size: var(--md-body-medium-size);
+  line-height: var(--md-body-medium-line);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-brand {
+  padding: 8px;
+}
+
+.drawer-brand__name {
+  font-size: var(--md-title-medium-size);
+  line-height: var(--md-title-medium-line);
+  font-weight: var(--md-title-medium-weight);
+  color: var(--md-on-surface);
 }
 </style>

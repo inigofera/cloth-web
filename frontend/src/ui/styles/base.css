@@ -1,0 +1,67 @@
+/*
+ * Minimal base styles for the design system.
+ * Kept intentionally small so it stays portable; app-specific layout
+ * lives outside this folder.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--md-font-family);
+  font-size: var(--md-body-large-size);
+  line-height: var(--md-body-large-line);
+  font-weight: var(--md-body-large-weight);
+  background: var(--md-background);
+  color: var(--md-on-background);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  height: 100%;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--md-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--md-primary) 25%, transparent);
+}

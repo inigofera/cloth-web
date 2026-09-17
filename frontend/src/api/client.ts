@@ -1,4 +1,15 @@
-import type { ColumnInfo, CreateOutfitPayload, JsonValue, Outfit } from './types';
+import type {
+  Brand,
+  ClothingCategory,
+  ClothingItem,
+  ClothingSubcategory,
+  Color,
+  ColumnInfo,
+  CreateClothingItemPayload,
+  CreateOutfitPayload,
+  JsonValue,
+  Outfit
+} from './types';
 import { supabase } from '../lib/supabase';
 
 const API_BASE = '/api';
@@ -49,6 +60,27 @@ export const api = {
   listOutfits: () => fetchJson<Outfit[]>(`${API_BASE}/outfits`),
   createOutfit: (data: CreateOutfitPayload) => fetchJson<Outfit>(
     `${API_BASE}/outfits`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  listClothingItems: () => fetchJson<ClothingItem[]>(`${API_BASE}/db/clothing-items`),
+  createClothingItem: (data: CreateClothingItemPayload) => fetchJson<ClothingItem>(
+    `${API_BASE}/db/clothing-items`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  listColors: () => fetchJson<Color[]>(`${API_BASE}/db/colors`),
+  listCategories: () => fetchJson<ClothingCategory[]>(`${API_BASE}/db/clothing-categories`),
+  listSubcategories: () => fetchJson<ClothingSubcategory[]>(`${API_BASE}/db/clothing-subcategories`),
+  listBrands: () => fetchJson<Brand[]>(`${API_BASE}/db/brands`),
+  createColor: (data: { id: string; hex_value: string | null }) => fetchJson<Color>(
+    `${API_BASE}/colors`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  createCategory: (data: { name: string }) => fetchJson<ClothingCategory>(
+    `${API_BASE}/clothing-categories`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  createSubcategory: (data: { name: string; category_id: number }) => fetchJson<ClothingSubcategory>(
+    `${API_BASE}/clothing-subcategories`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
   )
 };
