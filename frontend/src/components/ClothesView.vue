@@ -265,6 +265,18 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
+import {
+  sanitizeText,
+  sanitizeInt,
+  sanitizeDecimal,
+  isValidDate,
+  NAME_MAX,
+  NOTES_MAX,
+  ORIGIN_MAX,
+  LAUNDRY_MAX,
+  PRICE_MAX,
+  WEAR_MAX,
+} from '../lib/sanitize';
 import { MdButton } from '../ui';
 import ClothingItemForm from './ClothingItemForm.vue';
 import {
@@ -383,10 +395,33 @@ function resetForm() {
   formError.value = null;
 }
 
+function sanitizeItemFields(f: ClothingItemFormState) {
+  return {
+    name: sanitizeText(f.name, { max: NAME_MAX }),
+    category_id: typeof f.category_id === 'number' ? f.category_id : null,
+    subcategory_id: typeof f.subcategory_id === 'number' ? f.subcategory_id : null,
+    color_id: f.color_id === NEW_OPTION ? null : f.color_id,
+    brand_id: f.brand_id === NEW_OPTION ? null : f.brand_id,
+    purchase_price: sanitizeDecimal(f.purchase_price, { min: 0, max: PRICE_MAX, dp: 2 }),
+    owned_since: isValidDate(f.owned_since) ? f.owned_since : null,
+    origin: sanitizeText(f.origin, { max: ORIGIN_MAX }) || null,
+    laundry_impact: sanitizeText(f.laundry_impact, { max: LAUNDRY_MAX }) || null,
+    wear_count: sanitizeInt(f.wear_count, { min: 0, max: WEAR_MAX }),
+    repairable: f.repairable,
+    is_active: f.is_active,
+    notes: sanitizeText(f.notes, { max: NOTES_MAX, keepNewlines: true }) || null
+  };
+}
+
 async function submitItem() {
   saving.value = true;
   formError.value = null;
   try {
+    const fields = sanitizeItemFields(form);
+    if (!fields.name) {
+      formError.value = 'Name is required.';
+      return;
+    }
     let imagePath: string | null = null;
     const file = addFormRef.value?.imageFile ?? null;
     if (file) {
@@ -394,19 +429,7 @@ async function submitItem() {
     }
 
     const created = await api.createClothingItem({
-      name: form.name.trim(),
-      category_id: typeof form.category_id === 'number' ? form.category_id : null,
-      subcategory_id: typeof form.subcategory_id === 'number' ? form.subcategory_id : null,
-      color_id: form.color_id === NEW_OPTION ? null : form.color_id,
-      brand_id: form.brand_id === NEW_OPTION ? null : form.brand_id,
-      purchase_price: form.purchase_price,
-      owned_since: form.owned_since || null,
-      origin: form.origin.trim() || null,
-      laundry_impact: form.laundry_impact.trim() || null,
-      wear_count: form.wear_count,
-      repairable: form.repairable,
-      is_active: form.is_active,
-      notes: form.notes.trim() || null,
+      ...fields,
       image_path: imagePath
     });
 
@@ -456,6 +479,11 @@ async function saveEdit() {
   editSaving.value = true;
   formError.value = null;
   try {
+    const fields = sanitizeItemFields(editForm);
+    if (!fields.name) {
+      formError.value = 'Name is required.';
+      return;
+    }
     let imagePath: string | null = null;
     const file = editFormRef.value?.imageFile ?? null;
     if (file) {
@@ -463,19 +491,7 @@ async function saveEdit() {
     }
 
     const updated = (await api.updateTableRow('clothing-items', item.id, {
-      name: editForm.name.trim(),
-      category_id: typeof editForm.category_id === 'number' ? editForm.category_id : null,
-      subcategory_id: typeof editForm.subcategory_id === 'number' ? editForm.subcategory_id : null,
-      color_id: editForm.color_id === NEW_OPTION ? null : editForm.color_id,
-      brand_id: editForm.brand_id === NEW_OPTION ? null : editForm.brand_id,
-      purchase_price: editForm.purchase_price,
-      owned_since: editForm.owned_since || null,
-      origin: editForm.origin.trim() || null,
-      laundry_impact: editForm.laundry_impact.trim() || null,
-      wear_count: editForm.wear_count,
-      repairable: editForm.repairable,
-      is_active: editForm.is_active,
-      notes: editForm.notes.trim() || null,
+      ...fields,
       ...(imagePath ? { image_path: imagePath } : {})
     })) as ClothingItem | null;
 

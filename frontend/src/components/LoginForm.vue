@@ -32,6 +32,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useAuth } from '../lib/auth';
+import { isValidEmail, PASSWORD_MAX } from '../lib/sanitize';
 
 const { signIn, signUp, signInWithOAuth } = useAuth();
 
@@ -49,9 +50,17 @@ function toggleMode() {
 }
 
 async function submit() {
-  busy.value = true;
   error.value = null;
   info.value = null;
+  if (!isValidEmail(email.value)) {
+    error.value = 'Please enter a valid email address.';
+    return;
+  }
+  if (!password.value || password.value.length > PASSWORD_MAX) {
+    error.value = 'Please enter a valid password.';
+    return;
+  }
+  busy.value = true;
   try {
     if (mode.value === 'signin') {
       const { error: authError } = await signIn(email.value, password.value);

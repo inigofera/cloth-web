@@ -112,6 +112,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
+import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
 import type { ClothingItem, Outfit } from '../api/types';
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -271,7 +272,7 @@ async function submitOutfit() {
   try {
     const created = await api.createOutfit({
       date: selectedDate.value,
-      notes: notes.value.trim() ? notes.value.trim() : null,
+      notes: sanitizeText(notes.value, { max: OUTFIT_NOTES_MAX }) || null,
       item_ids: selectedItems.value
     });
     outfits.value.push(created);

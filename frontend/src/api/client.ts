@@ -11,6 +11,7 @@ import type {
   Outfit
 } from './types';
 import { supabase } from '../lib/supabase';
+import { isValidObjectPath } from '../lib/sanitize';
 
 const API_BASE = '/api';
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_BUCKET as string;
@@ -41,6 +42,9 @@ function objectPathOf(path: string): string {
 export function imageUrl(path: string | null | undefined, opts?: ImageUrlOptions): string | null {
   if (!path) return null;
   const objectPath = objectPathOf(path);
+  // image_path is DB-sourced and attacker-writable via the generic table API;
+  // only render well-formed, single-user object paths.
+  if (!isValidObjectPath(objectPath)) return null;
   const params = new URLSearchParams();
   if (opts?.width) params.set('width', String(opts.width));
   if (accessToken) params.set('token', accessToken);

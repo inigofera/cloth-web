@@ -12,10 +12,14 @@
       <input
         :value="imageFile?.name ?? ''"
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp,image/gif"
         class="file-input"
         @change="onImageChange"
       />
+      <span v-if="imageError" class="field-error">{{ imageError }}</span>
+      <span v-else-if="imageFile" class="field-hint">
+        {{ imageFile.name }} ({{ formatSize(imageFile.size) }})
+      </span>
     </label>
 
     <div class="field-row">
@@ -195,6 +199,13 @@
 import { ref, reactive, computed } from 'vue';
 import { api } from '../api/client';
 import {
+  validateImageFile,
+  sanitizeText,
+  isValidHexColor,
+  NAME_MAX,
+  COLOR_NAME_MAX,
+} from '../lib/sanitize';
+import {
   NEW_OPTION,
   type Brand,
   type ClothingCategory,
@@ -234,6 +245,7 @@ const emit = defineEmits<{
 }>();
 
 const imageFile = ref<File | null>(null);
+const imageError = ref<string | null>(null);
 const addError = ref<string | null>(null);
 
 const newColor = reactive({ name: '', hex: '' });
@@ -245,9 +257,28 @@ const addingCategory = ref(false);
 const addingSubcategory = ref(false);
 const addingBrand = ref(false);
 
-function onImageChange(event: Event) {
+async function onImageChange(event: Event) {
   const target = event.target as HTMLInputElement;
-  imageFile.value = target.files?.[0] ?? null;
+  const file = target.files?.[0] ?? null;
+  imageError.value = null;
+  if (!file) {
+    imageFile.value = null;
+    return;
+  }
+  const result = await validateImageFile(file);
+  if (result.ok) {
+    imageFile.value = result.file;
+  } else {
+    imageFile.value = null;
+    imageError.value = result.error ?? 'Invalid image.';
+    target.value = '';
+  }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 const subcategoriesForSelection = computed(() => {
@@ -256,8 +287,13 @@ const subcategoriesForSelection = computed(() => {
 });
 
 async function addColor() {
-  const name = newColor.name.trim().toLowerCase();
+  const name = sanitizeText(newColor.name, { max: COLOR_NAME_MAX }).toLowerCase();
   if (!name) return;
+  const hex = newColor.hex.trim();
+  if (hex && !isValidHexColor(hex)) {
+    addError.value = 'Color hex must be in #RRGGBB format.';
+    return;
+  }
   addingColor.value = true;
   addError.value = null;
   try {
@@ -265,7 +301,7 @@ async function addColor() {
     if (existing) {
       props.form.color_id = existing.id;
     } else {
-      const created = await api.createColor({ id: name, hex_value: newColor.hex.trim() || null });
+      const created = await api.createColor({ id: name, hex_value: hex || null });
       emit('color-added', created);
       props.form.color_id = created.id;
     }
@@ -279,7 +315,7 @@ async function addColor() {
 }
 
 async function addCategory() {
-  const name = newCategory.name.trim();
+  const name = sanitizeText(newCategory.name, { max: NAME_MAX });
   if (!name) return;
   addingCategory.value = true;
   addError.value = null;
@@ -302,7 +338,7 @@ async function addCategory() {
 
 async function addSubcategory() {
   if (typeof props.form.category_id !== 'number') return;
-  const name = newSubcategory.name.trim();
+  const name = sanitizeText(newSubcategory.name, { max: NAME_MAX });
   if (!name) return;
   addingSubcategory.value = true;
   addError.value = null;
@@ -326,7 +362,7 @@ async function addSubcategory() {
 }
 
 async function addBrand() {
-  const name = newBrand.name.trim();
+  const name = sanitizeText(newBrand.name, { max: NAME_MAX });
   if (!name) return;
   addingBrand.value = true;
   addError.value = null;
@@ -354,6 +390,7 @@ function clearTransient() {
   newSubcategory.name = '';
   newBrand.name = '';
   imageFile.value = null;
+  imageError.value = null;
 }
 
 defineExpose({ imageFile, clearTransient });
@@ -421,6 +458,20 @@ defineExpose({ imageFile, clearTransient });
 .file-input {
   font-size: 0.85rem;
   width: 100%;
+}
+
+.field-error {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #c0392b;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #666;
 }
 
 .inline-add {

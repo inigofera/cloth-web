@@ -139,6 +139,13 @@ pub async fn insert_table_row(
         return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
     }
 
+    // Reject image_path values that point outside the user's own folder.
+    if let Some(obj) = payload.as_object() {
+        if let Some(image_path) = obj.get("image_path") {
+            validate_image_path(image_path, &user_id)?;
+        }
+    }
+
     // force ownership to the authenticated user, generate id if absent
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("user_id".into(), serde_json::to_value(user_id).unwrap());
@@ -223,6 +230,11 @@ pub async fn update_table_row(
         Some(m) if !m.is_empty() => m,
         _ => return Ok(Json(None)),
     };
+
+    // Reject image_path values that point outside the user's own folder.
+    if let Some(image_path) = obj.get("image_path") {
+        validate_image_path(image_path, &user_id)?;
+    }
 
     // Build dynamic column list from provided keys (excluding id and user_id)
     let cols: Vec<String> = obj
@@ -449,6 +461,8 @@ pub async fn create_outfit(
 
 const MAX_IMAGE_DIMENSION: u32 = 1600;
 const JPEG_QUALITY: u8 = 80;
+/// Upper bound for the `?width=` resize request to prevent memory DoS.
+const MAX_SERVE_WIDTH: u32 = 4096;
 
 fn exif_orientation(data: &[u8]) -> u16 {
     use exif::{In, Reader, Tag, Value};
@@ -626,20 +640,71 @@ fn resize_image(data: &[u8], width: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// True when a storage object path belongs to `user_id` and contains no
+/// traversal. Gates `/files/*path` reads and validates `image_path` values
+/// written via the generic table API, so a client can never reference another
+/// user's stored file.
+fn object_path_within_user(object_path: &str, user_id: &Uuid) -> bool {
+    if object_path.contains("..") || object_path.contains('\\') {
+        return false;
+    }
+    object_path.starts_with(&format!("users/{user_id}/"))
+}
+
+/// Reduce a stored `image_path` (full storage URL or bare object path) to the
+/// bare object path (`users/{uid}/{uuid}-{name}.{ext}`).
+fn extract_object_path(image_path: &str) -> &str {
+    match image_path.find("users/") {
+        Some(idx) => &image_path[idx..],
+        None => image_path,
+    }
+}
+
+/// Validate an `image_path` value supplied in a table write payload. It must be
+/// a string that resolves to an object path within the authenticated user's own
+/// folder.
+fn validate_image_path(value: &JsonValue, user_id: &Uuid) -> Result<(), (StatusCode, String)> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let path = value
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "image_path must be a string".into()))?;
+    if path.is_empty() {
+        return Ok(());
+    }
+    let object_path = extract_object_path(path);
+    if !object_path_within_user(object_path, user_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "image_path must reference one of your own images".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn serve_file(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    AuthUser(user_id): AuthUser,
     Path(path): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, (StatusCode, String)> {
     let storage = &state.storage;
+
+    // Only serve files that live inside the requesting user's own folder.
+    if !object_path_within_user(&path, &user_id) {
+        return Err((StatusCode::NOT_FOUND, "file not found".into()));
+    }
 
     let (data, content_type) = match storage.download_file(&path).await {
         Ok(v) => v,
         Err(_) => return Err((StatusCode::NOT_FOUND, "file not found".into())),
     };
 
-    let width = params.get("width").and_then(|w| w.parse::<u32>().ok());
+    let width = params
+        .get("width")
+        .and_then(|w| w.parse::<u32>().ok())
+        .map(|w| w.min(MAX_SERVE_WIDTH));
 
     let (body, content_type) = match width {
         Some(w) if w > 0 => match resize_image(&data, w) {
@@ -653,4 +718,97 @@ pub async fn serve_file(
         .header(header::CONTENT_TYPE, content_type)
         .body(axum::body::Body::from(body))
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: &str = "11111111-1111-4111-8111-111111111111";
+    const OTHER: &str = "99999999-9999-4999-8999-999999999999";
+
+    fn me() -> Uuid {
+        Uuid::parse_str(ME).unwrap()
+    }
+
+    #[test]
+    fn object_path_within_user_accepts_own_files() {
+        assert!(object_path_within_user(
+            &format!("users/{ME}/22222222-2222-4222-8222-222222222222-photo.jpg"),
+            &me()
+        ));
+    }
+
+    #[test]
+    fn object_path_within_user_rejects_other_users() {
+        assert!(!object_path_within_user(
+            &format!("users/{OTHER}/22222222-2222-4222-8222-222222222222-photo.jpg"),
+            &me()
+        ));
+    }
+
+    #[test]
+    fn object_path_within_user_rejects_traversal() {
+        assert!(!object_path_within_user(
+            &format!("users/{ME}/../../etc/passwd.png"),
+            &me()
+        ));
+        assert!(!object_path_within_user("users\\evil\\x.png", &me()));
+    }
+
+    #[test]
+    fn object_path_within_user_rejects_missing_prefix() {
+        assert!(!object_path_within_user("public/photo.jpg", &me()));
+        assert!(!object_path_within_user("", &me()));
+    }
+
+    #[test]
+    fn extract_object_path_from_full_url() {
+        let url = "https://x.supabase.co/storage/v1/object/public/myfiles/users/11111111-1111-4111-8111-111111111111/abc-photo.jpg";
+        assert_eq!(
+            extract_object_path(url),
+            "users/11111111-1111-4111-8111-111111111111/abc-photo.jpg"
+        );
+    }
+
+    #[test]
+    fn extract_object_path_bare() {
+        assert_eq!(
+            extract_object_path("users/11111111-1111-4111-8111-111111111111/abc-photo.jpg"),
+            "users/11111111-1111-4111-8111-111111111111/abc-photo.jpg"
+        );
+    }
+
+    #[test]
+    fn validate_image_path_accepts_own_and_empty() {
+        let u = me();
+        assert!(validate_image_path(&JsonValue::Null, &u).is_ok());
+        assert!(validate_image_path(&serde_json::json!(""), &u).is_ok());
+        assert!(validate_image_path(
+            &serde_json::json!("users/11111111-1111-4111-8111-111111111111/abc-photo.jpg"),
+            &u
+        )
+        .is_ok());
+        assert!(validate_image_path(
+            &serde_json::json!("https://x.supabase.co/storage/v1/object/public/myfiles/users/11111111-1111-4111-8111-111111111111/abc-photo.jpg"),
+            &u
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_image_path_rejects_foreign_traversal_and_non_string() {
+        let u = me();
+        assert!(validate_image_path(
+            &serde_json::json!("users/99999999-9999-4999-8999-999999999999/abc-photo.jpg"),
+            &u
+        )
+        .is_err());
+        assert!(validate_image_path(
+            &serde_json::json!("users/11111111-1111-4111-8111-111111111111/../../etc/passwd.png"),
+            &u
+        )
+        .is_err());
+        assert!(validate_image_path(&serde_json::json!(42), &u).is_err());
+    }
 }
