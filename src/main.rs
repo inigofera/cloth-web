@@ -4,14 +4,14 @@ mod storage;
 mod upload;
 mod routes;
 
-use axum::{Router, routing::{get, post}};
+use axum::{Router, routing::{get, post}, extract::DefaultBodyLimit};
 use axum::serve;
 use tokio::net::TcpListener;
 use std::sync::Arc;
 use dotenv::dotenv;
 use db::connect_db;
 use storage::SupabaseStorage;
-use routes::{upload_file, list_tables, get_table_rows, insert_table_row, delete_table_row, update_table_row, list_outfits, create_outfit, create_color, create_category, create_subcategory};
+use routes::{upload_file, serve_file, list_tables, get_table_rows, insert_table_row, delete_table_row, update_table_row, list_outfits, create_outfit, create_color, create_category, create_subcategory};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,6 +45,8 @@ async fn main() {
         .route("/clothing-categories", post(create_category))
         .route("/clothing-subcategories", post(create_subcategory))
         .route("/upload", post(upload_file))
+        .route("/files/*path", get(serve_file))
+        .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .with_state(state);
 
     println!("🚀 running on http://localhost:3000");

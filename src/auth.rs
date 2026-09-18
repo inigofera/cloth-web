@@ -30,6 +30,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| token_from_query(parts))
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
 
         let decoding_key =
@@ -51,4 +52,14 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
         Ok(AuthUser(user_id))
     }
+}
+
+fn token_from_query(parts: &Parts) -> Option<&str> {
+    let query = parts.uri.query()?;
+    query.split('&').find_map(|pair| {
+        let mut kv = pair.splitn(2, '=');
+        let key = kv.next()?;
+        let value = kv.next()?;
+        (key == "token").then_some(value)
+    })
 }

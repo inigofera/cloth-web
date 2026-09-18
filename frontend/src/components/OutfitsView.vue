@@ -33,7 +33,7 @@
                 class="outfit-chip"
                 :title="chipTitle(outfit)"
               >
-                <img v-if="firstItemImage(outfit)" :src="firstItemImage(outfit)!" class="chip-thumb" />
+                <img v-if="firstItemImage(outfit, 28)" :src="firstItemImage(outfit, 28)!" class="chip-thumb" />
                 <span class="chip-label">{{ chipLabel(outfit) }}</span>
               </div>
               <div v-if="cell.outfits.length > 3" class="more-chip">
@@ -83,7 +83,7 @@
                     type="checkbox"
                     :value="item.id"
                   />
-                  <img v-if="imageUrl(item.image_path)" :src="imageUrl(item.image_path)" class="thumb" />
+                    <img v-if="imageUrl(item.image_path, { width: 56 })" :src="imageUrl(item.image_path, { width: 56 })" class="thumb" />
                   <span class="item-name">{{ item.name }}</span>
                 </label>
                 <div v-if="items.length === 0" class="picker-empty">
@@ -245,9 +245,9 @@ function closeForm() {
   formError.value = null;
 }
 
-function firstItemImage(outfit: Outfit): string | null {
+function firstItemImage(outfit: Outfit, width: number): string | null {
   for (const item of outfit.items) {
-    const url = imageUrl(item.image_path);
+    const url = imageUrl(item.image_path, { width });
     if (url) return url;
   }
   return null;

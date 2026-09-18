@@ -9,8 +9,8 @@
       <div class="detail-layout">
         <div class="detail-media">
           <img
-            v-if="imageUrl(selectedItem.image_path)"
-            :src="imageUrl(selectedItem.image_path)"
+            v-if="imageUrl(selectedItem.image_path, { width: 720 })"
+            :src="imageUrl(selectedItem.image_path, { width: 720 })"
             :alt="selectedItem.name"
           />
           <div v-else class="detail-media-placeholder">No image</div>
@@ -172,8 +172,8 @@
           >
             <div class="item-card__media">
               <img
-                v-if="imageUrl(item.image_path)"
-                :src="imageUrl(item.image_path)"
+                v-if="imageUrl(item.image_path, { width: 480 })"
+                :src="imageUrl(item.image_path, { width: 480 })"
                 class="item-image"
               />
               <div v-else class="item-image placeholder">

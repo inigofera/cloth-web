@@ -28,7 +28,7 @@ impl SupabaseStorage {
 
         let res = self
             .client
-            .post(&url)
+            .put(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("apikey", &self.api_key)
             .body(bytes)
@@ -48,5 +48,33 @@ impl SupabaseStorage {
             "{}/storage/v1/object/public/{}/{}",
             self.base_url, self.bucket, key
         )
+    }
+
+    pub async fn download_file(&self, path: &str) -> anyhow::Result<(Vec<u8>, String)> {
+        let url = format!(
+            "{}/storage/v1/object/{}/{}",
+            self.base_url, self.bucket, path
+        );
+
+        let res = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("apikey", &self.api_key)
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            let content_type = res
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let bytes = res.bytes().await?;
+            Ok((bytes.to_vec(), content_type))
+        } else {
+            Err(anyhow::anyhow!("download failed: {:?}", res.text().await?))
+        }
     }
 }

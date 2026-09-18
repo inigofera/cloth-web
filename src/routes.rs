@@ -1,5 +1,11 @@
-use axum::{Json, extract::{Multipart, Path, State}, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Multipart, Path, Query, State},
+    http::{StatusCode, header},
+    response::Response,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use sqlx::{FromRow, Row};
@@ -441,6 +447,84 @@ pub async fn create_outfit(
     Ok(Json(created.0))
 }
 
+const MAX_IMAGE_DIMENSION: u32 = 1600;
+const JPEG_QUALITY: u8 = 80;
+
+fn exif_orientation(data: &[u8]) -> u16 {
+    use exif::{In, Reader, Tag, Value};
+    let mut reader = std::io::BufReader::new(std::io::Cursor::new(data));
+    match Reader::new().read_from_container(&mut reader) {
+        Ok(exif) => exif
+            .get_field(Tag::Orientation, In(1))
+            .and_then(|f| match &f.value {
+                Value::Short(v) => v.first().copied(),
+                _ => None,
+            })
+            .unwrap_or(1),
+        Err(_) => 1,
+    }
+}
+
+fn apply_orientation(img: image::RgbaImage, orientation: u16) -> image::RgbaImage {
+    use image::imageops;
+    match orientation {
+        2 => imageops::flip_horizontal(&img),
+        3 => imageops::rotate180(&img),
+        4 => imageops::flip_vertical(&img),
+        5 => imageops::flip_horizontal(&imageops::rotate270(&img)),
+        6 => imageops::rotate90(&img),
+        7 => imageops::flip_horizontal(&imageops::rotate90(&img)),
+        8 => imageops::rotate270(&img),
+        _ => img,
+    }
+}
+
+fn with_jpeg_extension(filename: &str) -> String {
+    match filename.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => format!("{stem}.jpg"),
+        _ => format!("{filename}.jpg"),
+    }
+}
+
+fn compress_image(data: &[u8], filename: &str) -> (Vec<u8>, String) {
+    let img = match image::load_from_memory(data) {
+        Ok(img) => img.to_rgba8(),
+        Err(_) => return (data.to_vec(), filename.to_string()),
+    };
+
+    let oriented = apply_orientation(img, exif_orientation(data));
+
+    if oriented.pixels().any(|p| p[3] < 255) {
+        return (data.to_vec(), filename.to_string());
+    }
+
+    let (w, h) = oriented.dimensions();
+    let resized = if (w.max(h)) as f64 > MAX_IMAGE_DIMENSION as f64 {
+        let scale = MAX_IMAGE_DIMENSION as f64 / (w.max(h)) as f64;
+        image::imageops::resize(
+            &oriented,
+            (w as f64 * scale).round().max(1.0) as u32,
+            (h as f64 * scale).round().max(1.0) as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        oriented
+    };
+
+    let rgb = image::DynamicImage::ImageRgba8(resized).to_rgb8();
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+    if encoder
+        .encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .is_err()
+        || out.len() >= data.len()
+    {
+        return (data.to_vec(), filename.to_string());
+    }
+
+    (out, with_jpeg_extension(filename))
+}
+
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
@@ -480,10 +564,17 @@ pub async fn upload_file(
         crate::upload::validate_image_content(&data)
             .map_err(|e| (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()))?;
 
-        let key = crate::upload::build_storage_key(&user_id, &sanitized);
+        let (data, filename) = compress_image(&data, &sanitized);
+        let key_name = if filename == sanitized {
+            sanitized
+        } else {
+            crate::upload::sanitize_filename(&filename)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        };
+        let key = crate::upload::build_storage_key(&user_id, &key_name);
 
         storage
-            .upload_file(&key, data.to_vec())
+            .upload_file(&key, data)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage upload failed: {e}")))?;
 
@@ -491,4 +582,75 @@ pub async fn upload_file(
     }
 
     Err((StatusCode::BAD_REQUEST, "no file uploaded".to_string()))
+}
+
+fn content_type_for(path: &str, stored: &str) -> String {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let inferred = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        _ => stored,
+    };
+    inferred.to_string()
+}
+
+fn resize_image(data: &[u8], width: u32) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(data).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    if w <= width {
+        return None;
+    }
+    let scale = width as f64 / w as f64;
+    let new_h = (h as f64 * scale).round().max(1.0) as u32;
+    let resized =
+        image::imageops::resize(&img, width, new_h, image::imageops::FilterType::Lanczos3);
+    let rgb = image::DynamicImage::ImageRgba8(resized).to_rgb8();
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    Some(out)
+}
+
+pub async fn serve_file(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Path(path): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, (StatusCode, String)> {
+    let storage = &state.storage;
+
+    let (data, content_type) = match storage.download_file(&path).await {
+        Ok(v) => v,
+        Err(_) => return Err((StatusCode::NOT_FOUND, "file not found".into())),
+    };
+
+    let width = params.get("width").and_then(|w| w.parse::<u32>().ok());
+
+    let (body, content_type) = match width {
+        Some(w) if w > 0 => match resize_image(&data, w) {
+            Some(resized) => (resized, "image/jpeg".to_string()),
+            None => (data, content_type_for(&path, &content_type)),
+        },
+        _ => (data, content_type_for(&path, &content_type)),
+    };
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .body(axum::body::Body::from(body))
+        .unwrap())
 }

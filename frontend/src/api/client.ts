@@ -13,13 +13,39 @@ import type {
 import { supabase } from '../lib/supabase';
 
 const API_BASE = '/api';
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_BUCKET as string;
 
-export function imageUrl(path: string | null | undefined): string | null {
+let accessToken: string | null = null;
+
+function syncToken(session: { access_token: string } | null): void {
+  accessToken = session?.access_token ?? null;
+}
+
+supabase.auth.getSession().then(({ data }) => syncToken(data.session));
+supabase.auth.onAuthStateChange((_event, session) => syncToken(session));
+
+export interface ImageUrlOptions {
+  width?: number;
+}
+
+function objectPathOf(path: string): string {
+  const publicMarker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+  const authMarker = `/storage/v1/object/authenticated/${STORAGE_BUCKET}/`;
+  const idx = path.indexOf(publicMarker);
+  if (idx !== -1) return path.slice(idx + publicMarker.length);
+  const aidx = path.indexOf(authMarker);
+  if (aidx !== -1) return path.slice(aidx + authMarker.length);
+  return path.replace(/^\/+/, '');
+}
+
+export function imageUrl(path: string | null | undefined, opts?: ImageUrlOptions): string | null {
   if (!path) return null;
-  if (path.startsWith('http')) return path;
-  return `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+  const objectPath = objectPathOf(path);
+  const params = new URLSearchParams();
+  if (opts?.width) params.set('width', String(opts.width));
+  if (accessToken) params.set('token', accessToken);
+  const qs = params.toString();
+  return `${API_BASE}/files/${objectPath}${qs ? `?${qs}` : ''}`;
 }
 
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
