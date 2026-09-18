@@ -92,6 +92,10 @@ export const api = {
     `${API_BASE}/outfits`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
   ),
+  deleteOutfit: (id: string) => fetchJson<JsonValue>(
+    `${API_BASE}/outfits/${encodeURIComponent(id)}`,
+    { method: 'DELETE' }
+  ),
   listClothingItems: () => fetchJson<ClothingItem[]>(`${API_BASE}/db/clothing-items`),
   createClothingItem: (data: CreateClothingItemPayload) => fetchJson<ClothingItem>(
     `${API_BASE}/db/clothing-items`,

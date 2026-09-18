@@ -11,7 +11,7 @@ use std::sync::Arc;
 use dotenv::dotenv;
 use db::connect_db;
 use storage::SupabaseStorage;
-use routes::{upload_file, serve_file, list_tables, get_table_rows, insert_table_row, delete_table_row, update_table_row, list_outfits, create_outfit, create_color, create_category, create_subcategory};
+use routes::{upload_file, serve_file, list_tables, get_table_rows, insert_table_row, delete_table_row, update_table_row, list_outfits, create_outfit, delete_outfit, create_color, create_category, create_subcategory};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -41,6 +41,7 @@ async fn main() {
         .route("/db/:table/:id", axum::routing::delete(delete_table_row))
         .route("/db/:table/:id", axum::routing::patch(update_table_row))
         .route("/outfits", get(list_outfits).post(create_outfit))
+        .route("/outfits/:id", axum::routing::delete(delete_outfit))
         .route("/colors", post(create_color))
         .route("/clothing-categories", post(create_category))
         .route("/clothing-subcategories", post(create_subcategory))

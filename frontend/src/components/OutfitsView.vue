@@ -288,7 +288,7 @@ async function submitOutfit() {
 
 async function removeOutfit(outfit: Outfit) {
   try {
-    await api.deleteTableRow('outfits', outfit.id);
+    await api.deleteOutfit(outfit.id);
     outfits.value = outfits.value.filter(o => o.id !== outfit.id);
   } catch (err) {
     loadError.value = String(err);

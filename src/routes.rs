@@ -190,6 +190,13 @@ pub async fn delete_table_row(
     Path((table, id)): Path<(String, String)>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Option<JsonValue>>, (StatusCode, String)> {
+    // Outfit deletion must go through DELETE /outfits/:id so wear counts stay in sync.
+    if table == "outfits" {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "use DELETE /outfits/:id to delete outfits".into(),
+        ));
+    }
     if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
         return Err((StatusCode::NOT_FOUND, "table not found".into()));
     }
@@ -444,6 +451,18 @@ pub async fn create_outfit(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not link item: {e}")))?;
     }
 
+    sqlx::query(
+        "UPDATE \"clothing-items\" ci \
+         SET wear_count = COALESCE(ci.wear_count, 0) + 1, updated_at = now() \
+         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1) s \
+         WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
+    )
+    .bind(&outfit_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not update wear counts: {e}")))?;
+
     tx.commit()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -457,6 +476,57 @@ pub async fn create_outfit(
         .unwrap();
 
     Ok(Json(created.0))
+}
+
+pub async fn delete_outfit(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(outfit_id): Path<String>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let outfit_uuid = Uuid::parse_str(&outfit_id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "outfit not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        "UPDATE \"clothing-items\" ci \
+         SET wear_count = GREATEST(COALESCE(ci.wear_count, 0) - 1, 0), updated_at = now() \
+         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1) s \
+         WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
+    )
+    .bind(outfit_uuid)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not update wear counts: {e}")))?;
+
+    sqlx::query("DELETE FROM \"outfit-items\" WHERE outfit_id = $1")
+        .bind(outfit_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let row: Option<(JsonValue,)> = sqlx::query_as(
+        "DELETE FROM outfits WHERE id = $1 AND user_id = $2 RETURNING to_jsonb(outfits) AS row",
+    )
+    .bind(outfit_uuid)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match row {
+        Some(r) => Ok(Json(r.0)),
+        None => Err((StatusCode::NOT_FOUND, "outfit not found".into())),
+    }
 }
 
 const MAX_IMAGE_DIMENSION: u32 = 1600;
