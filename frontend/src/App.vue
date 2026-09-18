@@ -28,6 +28,7 @@
         <main class="content">
           <ClothesView v-if="activeTab === 'clothes'" />
           <OutfitsView v-else-if="activeTab === 'outfits'" />
+          <InsightsView v-else-if="activeTab === 'insights'" />
           <TablesView v-else-if="activeTab === 'tables'" />
         </main>
       </div>
@@ -36,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { defineAsyncComponent, ref } from 'vue';
 import { useAuth } from './lib/auth';
 import ClothesView from './components/ClothesView.vue';
 import OutfitsView from './components/OutfitsView.vue';
@@ -44,11 +45,15 @@ import TablesView from './components/TablesView.vue';
 import LoginForm from './components/LoginForm.vue';
 import { MdAppBar, MdNavDrawer, MdButton, type DrawerItem } from './ui';
 
+// Chart.js is only needed by the Insights tab — keep it out of the main bundle.
+const InsightsView = defineAsyncComponent(() => import('./components/InsightsView.vue'));
+
 const { session, user, ready, signOut } = useAuth();
 
 const navItems: DrawerItem[] = [
   { id: 'clothes', label: 'Clothes', icon: 'grid' },
   { id: 'outfits', label: 'Outfits', icon: 'shirt' },
+  { id: 'insights', label: 'Insights', icon: 'insights' },
   { id: 'tables', label: 'Tables', icon: 'table' },
 ];
 
