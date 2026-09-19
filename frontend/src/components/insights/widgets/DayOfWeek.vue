@@ -7,13 +7,17 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { dayOfWeek } from '../../../lib/insights/metrics';
+import { dayOfWeek, rangeData, widgetRange, type TrendMetric } from '../../../lib/insights/metrics';
 import { axisOptions, chartTheme } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const points = computed(() => dayOfWeek(props.data));
+const metric = computed<TrendMetric>(() => (props.config.metric === 'items' ? 'items' : 'outfits'));
+
+const data = computed(() => rangeData(props.data, widgetRange(props.config)));
+
+const points = computed(() => dayOfWeek(data.value, metric.value));
 const hasData = computed(() => points.value.some(p => p.value > 0));
 
 const chartData = computed<ChartData<'bar'>>(() => {
@@ -22,7 +26,7 @@ const chartData = computed<ChartData<'bar'>>(() => {
     labels: points.value.map(p => p.label),
     datasets: [
       {
-        label: 'Outfits',
+        label: metric.value === 'items' ? 'Unique items' : 'Outfits',
         data: points.value.map(p => p.value),
         backgroundColor: points.value.map(p => (p.value === max.value ? t.primary : `${t.primary}66`)),
         borderRadius: 6,

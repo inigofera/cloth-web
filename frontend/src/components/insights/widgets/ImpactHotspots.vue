@@ -10,7 +10,7 @@
       <span class="impact-wears">{{ r.wears }}× worn</span>
     </div>
   </div>
-  <div v-else class="widget-empty">No high-impact items in your wardrobe.</div>
+  <div v-else class="widget-empty">No {{ includeMedium ? 'high or medium' : 'high' }}-impact items in your wardrobe.</div>
 </template>
 
 <script setup lang="ts">
@@ -26,7 +26,19 @@ const n = computed(() => {
   return Number.isFinite(v) && v > 0 ? Math.min(15, Math.round(v)) : 5;
 });
 
-const rows = computed(() => impactHotspots(props.data, n.value));
+const includeMedium = computed(() => props.config.includeMedium === true);
+
+const minWears = computed(() => {
+  const v = Number(props.config.minWears);
+  return Number.isFinite(v) && v > 0 ? Math.min(20, Math.round(v)) : 0;
+});
+
+const rows = computed(() =>
+  impactHotspots(props.data, n.value, {
+    includeMedium: includeMedium.value,
+    minWears: minWears.value,
+  }),
+);
 
 function thumb(path: string | null): string | null {
   return imageUrl(path, { width: 56 });

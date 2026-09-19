@@ -7,7 +7,7 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { wearTrend } from '../../../lib/insights/metrics';
+import { rangeData, wearTrend, widgetRange, type TrendMetric } from '../../../lib/insights/metrics';
 import { axisOptions, chartTheme } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
@@ -17,7 +17,20 @@ const granularity = computed<'week' | 'month'>(() =>
   props.config.granularity === 'month' ? 'month' : 'week',
 );
 
-const trend = computed(() => wearTrend(props.data, granularity.value));
+const metric = computed<TrendMetric>(() => {
+  const v = props.config.metric;
+  return v === 'items' || v === 'items_per_outfit' ? v : 'outfits';
+});
+
+const data = computed(() => rangeData(props.data, widgetRange(props.config)));
+
+const trend = computed(() => wearTrend(data.value, granularity.value, metric.value));
+
+const METRIC_LABELS: Record<TrendMetric, string> = {
+  outfits: 'Outfits',
+  items: 'Unique items',
+  items_per_outfit: 'Items per outfit',
+};
 
 const chartData = computed<ChartData<'line'>>(() => {
   const t = chartTheme();
@@ -25,7 +38,7 @@ const chartData = computed<ChartData<'line'>>(() => {
     labels: trend.value.map(p => p.label),
     datasets: [
       {
-        label: 'Outfits',
+        label: METRIC_LABELS[metric.value],
         data: trend.value.map(p => p.value),
         borderColor: t.primary,
         backgroundColor: `${t.primary}26`,
@@ -45,7 +58,11 @@ const chartOptions = computed<ChartOptions<'line'>>(() => ({
   plugins: { legend: { display: false } },
   scales: {
     x: { ...axis, grid: { display: false }, ticks: { ...axis.ticks, maxTicksLimit: 10 } },
-    y: { ...axis, beginAtZero: true, ticks: { ...axis.ticks, precision: 0 } },
+    y: {
+      ...axis,
+      beginAtZero: true,
+      ticks: { ...axis.ticks, precision: metric.value === 'items_per_outfit' ? 1 : 0 },
+    },
   },
 }));
 </script>

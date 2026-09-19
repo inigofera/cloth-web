@@ -7,7 +7,7 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { brandBreakdown } from '../../../lib/insights/metrics';
+import { brandBreakdown, type BreakdownMetric } from '../../../lib/insights/metrics';
 import { axisOptions, chartTheme } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
@@ -18,7 +18,22 @@ const n = computed(() => {
   return Number.isFinite(v) && v > 0 ? Math.min(20, Math.round(v)) : 8;
 });
 
-const rows = computed(() => brandBreakdown(props.data, n.value));
+const metric = computed<BreakdownMetric>(() => {
+  const v = props.config.metric;
+  return v === 'spend' || v === 'avg' ? v : 'items';
+});
+
+const includeNoBrand = computed(() => props.config.includeNoBrand !== false);
+
+const rows = computed(() =>
+  brandBreakdown(props.data, n.value, { metric: metric.value, includeNoBrand: includeNoBrand.value }),
+);
+
+const METRIC_LABELS: Record<BreakdownMetric, string> = {
+  items: 'Items',
+  spend: 'Spend',
+  avg: 'Avg price',
+};
 
 const chartData = computed<ChartData<'bar'>>(() => {
   const t = chartTheme();
@@ -26,7 +41,7 @@ const chartData = computed<ChartData<'bar'>>(() => {
     labels: rows.value.map(r => r.label),
     datasets: [
       {
-        label: 'Items',
+        label: METRIC_LABELS[metric.value],
         data: rows.value.map(r => r.value),
         backgroundColor: t.primary,
         borderRadius: 6,
@@ -42,7 +57,7 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
   indexAxis: 'y',
   plugins: { legend: { display: false } },
   scales: {
-    x: { ...axis, beginAtZero: true, ticks: { ...axis.ticks, precision: 0 } },
+    x: { ...axis, beginAtZero: true, ticks: { ...axis.ticks, precision: metric.value === 'avg' ? 1 : 0 } },
     y: { ...axis, grid: { display: false } },
   },
 }));

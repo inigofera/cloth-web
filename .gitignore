@@ -1,3 +1,5 @@
 .env
 /target/
 node_modules/
+cloth_export_*.json
+scripts/*.generated.sql

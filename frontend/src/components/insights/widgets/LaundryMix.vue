@@ -7,13 +7,21 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { laundryMix } from '../../../lib/insights/metrics';
+import { laundryMix, type BreakdownMetric } from '../../../lib/insights/metrics';
 import { paletteColor } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const slices = computed(() => laundryMix(props.data));
+const metric = computed<BreakdownMetric>(() =>
+  props.config.metric === 'spend' ? 'spend' : 'items',
+);
+
+const includeNotSet = computed(() => props.config.includeNotSet !== false);
+
+const slices = computed(() =>
+  laundryMix(props.data, { metric: metric.value, includeNotSet: includeNotSet.value }),
+);
 
 const IMPACT_COLORS: Record<string, string> = {
   Low: '#6750a4',

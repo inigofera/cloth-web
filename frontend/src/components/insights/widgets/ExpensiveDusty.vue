@@ -1,6 +1,6 @@
 <template>
   <div v-if="rows.length" class="ed-list">
-    <div v-for="r in rows.slice(0, 8)" :key="r.id" class="ed-row">
+    <div v-for="r in rows" :key="r.id" class="ed-row">
       <img v-if="thumb(r.image_path)" :src="thumb(r.image_path)!" class="ed-thumb" alt="" />
       <div v-else class="ed-thumb ed-thumb--empty"></div>
       <div class="ed-main">
@@ -15,7 +15,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { expensiveDusty } from '../../../lib/insights/metrics';
+import { expensiveDusty, type ExpensiveDustySort } from '../../../lib/insights/metrics';
 import { formatPrice } from '../../../lib/insights/format';
 import { imageUrl } from '../../../api/client';
 import type { FilteredData } from '../../../lib/insights/types';
@@ -32,7 +32,22 @@ const maxWears = computed(() => {
   return Number.isFinite(v) && v >= 0 ? Math.min(20, Math.round(v)) : 0;
 });
 
-const rows = computed(() => expensiveDusty(props.data, minPrice.value, maxWears.value));
+const sortBy = computed<ExpensiveDustySort>(() => {
+  const v = props.config.sortBy;
+  return v === 'wears' || v === 'cpw' ? v : 'price';
+});
+
+const topN = computed(() => {
+  const v = Number(props.config.topN);
+  return Number.isFinite(v) && v > 0 ? Math.min(20, Math.round(v)) : 8;
+});
+
+const rows = computed(() =>
+  expensiveDusty(props.data, minPrice.value, maxWears.value, {
+    sortBy: sortBy.value,
+    topN: topN.value,
+  }),
+);
 
 function thumb(path: string | null): string | null {
   return imageUrl(path, { width: 56 });

@@ -7,7 +7,7 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { categoryBreakdown } from '../../../lib/insights/metrics';
+import { categoryBreakdown, type BreakdownMetric } from '../../../lib/insights/metrics';
 import { paletteColor } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
@@ -17,7 +17,18 @@ const level = computed<'category' | 'subcategory'>(() =>
   props.config.level === 'subcategory' ? 'subcategory' : 'category',
 );
 
-const slices = computed(() => categoryBreakdown(props.data, level.value));
+const metric = computed<BreakdownMetric>(() =>
+  props.config.metric === 'spend' ? 'spend' : 'items',
+);
+
+const topN = computed(() => {
+  const v = Number(props.config.topN);
+  return Number.isFinite(v) && v > 0 ? Math.min(12, Math.round(v)) : 0;
+});
+
+const slices = computed(() =>
+  categoryBreakdown(props.data, level.value, { metric: metric.value, topN: topN.value }),
+);
 
 const chartData = computed<ChartData<'doughnut'>>(() => ({
   labels: slices.value.map(s => s.label),

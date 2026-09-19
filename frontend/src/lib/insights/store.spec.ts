@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { defineComponent } from 'vue';
-import { defaultLayout, loadLayout, saveLayout, newWidgetId } from './store';
+import { createInstance, defaultLayout, loadLayout, saveLayout, newWidgetId } from './store';
 import type { WidgetDef, WidgetInstance } from './types';
 
 const stub = defineComponent({ name: 'Stub', render: () => null });
@@ -126,6 +126,19 @@ describe('loadLayout', () => {
       { id: 'b', type: 'stat-card', size: 'sm', config: { metric: 'total_spend' } },
     ]);
     expect(loadLayout(catalog)).toHaveLength(2);
+  });
+});
+
+describe('createInstance', () => {
+  it('merges config overrides with the catalog defaults', () => {
+    const catalog = new Map([
+      [
+        'stat-card',
+        def('stat-card', 'sm', { metric: 'total_items', range: 'all', dustyDays: 30 }),
+      ],
+    ]);
+    const inst = createInstance('stat-card', catalog, { config: { metric: 'total_spend' } });
+    expect(inst?.config).toEqual({ metric: 'total_spend', range: 'all', dustyDays: 30 });
   });
 });
 

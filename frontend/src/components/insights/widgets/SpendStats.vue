@@ -12,20 +12,31 @@
       <div class="spend__value">{{ stats.median == null ? '—' : formatPrice(stats.median) }}</div>
       <div class="spend__label">Median</div>
     </div>
-    <div class="spend__footnote">{{ stats.count }} item{{ stats.count === 1 ? '' : 's' }} with a price</div>
+    <div class="spend__footnote">{{ stats.count }} item{{ stats.count === 1 ? '' : 's' }} with a price{{ scopeLabel }}</div>
   </div>
   <div v-else class="widget-empty">No prices set yet.</div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { spendStats } from '../../../lib/insights/metrics';
+import { spendStats, type SpendScope } from '../../../lib/insights/metrics';
 import { formatPrice } from '../../../lib/insights/format';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const stats = computed(() => spendStats(props.data));
+const scope = computed<SpendScope>(() => {
+  const v = props.config.scope;
+  return v === 'this_year' || v === 'last_year' ? v : 'all';
+});
+
+const scopeLabel = computed(() => {
+  if (scope.value === 'this_year') return ` · acquired ${new Date().getUTCFullYear()}`;
+  if (scope.value === 'last_year') return ` · acquired ${new Date().getUTCFullYear() - 1}`;
+  return '';
+});
+
+const stats = computed(() => spendStats(props.data, scope.value));
 </script>
 
 <style scoped>

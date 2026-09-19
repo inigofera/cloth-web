@@ -60,7 +60,7 @@
         </div>
       </div>
 
-      <div v-for="field in def.configSchema" :key="field.key" class="config-row">
+      <div v-for="field in visibleFields" :key="field.key" class="config-row">
         <span class="config-label">{{ field.label }}</span>
 
         <select
@@ -72,6 +72,36 @@
           <option v-for="opt in field.options" :key="String(opt.value)" :value="String(opt.value)">
             {{ opt.label }}
           </option>
+        </select>
+
+        <select
+          v-else-if="field.kind === 'item-select'"
+          class="config-input config-input--item"
+          :value="String(instance.config[field.key] ?? '')"
+          @change="onConfigChange(field, ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">All items</option>
+          <option v-for="it in itemOptions" :key="it.id" :value="it.id">{{ it.name }}</option>
+        </select>
+
+        <select
+          v-else-if="field.kind === 'category-select'"
+          class="config-input config-input--item"
+          :value="String(instance.config[field.key] ?? '')"
+          @change="onConfigChange(field, ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">All categories</option>
+          <option v-for="c in categoryOptions" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
+        </select>
+
+        <select
+          v-else-if="field.kind === 'subcategory-select'"
+          class="config-input config-input--item"
+          :value="String(instance.config[field.key] ?? '')"
+          @change="onConfigChange(field, ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">All subcategories</option>
+          <option v-for="c in subOptionsForField(field)" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
         </select>
 
         <input
@@ -103,13 +133,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { MdIcon } from '../../ui';
+import { parseIdValue } from '../../lib/insights/metrics';
 import type { ConfigField, FilteredData, WidgetDef, WidgetInstance, WidgetSize } from '../../lib/insights/types';
 
 const SIZES: WidgetSize[] = ['sm', 'md', 'lg'];
 
-defineProps<{
+const props = defineProps<{
   def: WidgetDef;
   instance: WidgetInstance;
   data: FilteredData;
@@ -130,9 +161,90 @@ const configOpen = ref(false);
 const dragEnabled = ref(false);
 const dragging = ref(false);
 
-function onConfigChange(field: ConfigField, value: unknown) {
-  emit('update-config', { [field.key]: value });
+const visibleFields = computed(() =>
+  props.def.configSchema.filter(
+    f => !f.showWhen || props.instance.config[f.showWhen.key] === f.showWhen.equals,
+  ),
+);
+
+const itemOptions = computed(() =>
+  [...props.data.items].sort((a, b) => a.name.localeCompare(b.name)),
+);
+
+const categoryOptions = computed(() => {
+  const map = new Map<number, string>();
+  for (const it of props.data.items) {
+    if (it.category_id != null && it.category_name) map.set(it.category_id, it.category_name);
+  }
+  return [...map.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+});
+
+const subcategoryOptionsAll = computed(() => {
+  const map = new Map<number, { name: string; categoryId: number | null }>();
+  for (const it of props.data.items) {
+    if (it.subcategory_id != null && it.subcategory_name) {
+      const cur = map.get(it.subcategory_id);
+      if (!cur) map.set(it.subcategory_id, { name: it.subcategory_name, categoryId: it.category_id });
+    }
+  }
+  return [...map.entries()]
+    .map(([id, v]) => ({ id, name: v.name, categoryId: v.categoryId }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+});
+
+/** Subcategory options for a given category config value (all when no category is set). */
+function subOptionsForCategory(catValue: unknown) {
+  const catId = parseIdValue(catValue);
+  if (catId == null) return subcategoryOptionsAll.value;
+  return subcategoryOptionsAll.value.filter(c => c.categoryId === catId);
 }
+
+function subOptionsForField(field: ConfigField) {
+  if (field.kind !== 'subcategory-select') return [];
+  if (!field.dependsOn) return subcategoryOptionsAll.value;
+  return subOptionsForCategory(props.instance.config[field.dependsOn]);
+}
+
+function onConfigChange(field: ConfigField, value: unknown) {
+  const patch: Record<string, unknown> = { [field.key]: value };
+  if (field.kind === 'category-select') {
+    // If a subcategory field depends on this category and the currently chosen
+    // subcategory no longer belongs to it, clear it to avoid an empty result.
+    const subField = props.def.configSchema.find(
+      f => f.kind === 'subcategory-select' && f.dependsOn === field.key,
+    );
+    if (subField) {
+      const current = props.instance.config[subField.key];
+      const stillValid = subOptionsForCategory(value).some(o => String(o.id) === String(current));
+      if (!stillValid) patch[subField.key] = '';
+    }
+  }
+  emit('update-config', patch);
+}
+
+// Clear item/category/subcategory picks that no longer exist in the dataset
+// (deleted items, or ones hidden by the global filter). Without this, the
+// select would display "All" while the stale id silently filters to nothing.
+watch(
+  () => props.data,
+  () => {
+    const patch: Record<string, unknown> = {};
+    for (const field of props.def.configSchema) {
+      const value = props.instance.config[field.key];
+      if (typeof value !== 'string' || value === '') continue;
+      const exists =
+        field.kind === 'item-select'
+          ? props.data.items.some(i => i.id === value)
+          : field.kind === 'category-select'
+            ? categoryOptions.value.some(c => String(c.id) === value)
+            : field.kind === 'subcategory-select'
+              ? subcategoryOptionsAll.value.some(c => String(c.id) === value)
+              : true;
+      if (!exists) patch[field.key] = '';
+    }
+    if (Object.keys(patch).length > 0) emit('update-config', patch);
+  },
+);
 
 function onDragStart(e: DragEvent) {
   if (!dragEnabled.value) {
@@ -330,6 +442,10 @@ function onDrop(e: DragEvent) {
 
 .config-input--number {
   max-width: 90px;
+}
+
+.config-input--item {
+  max-width: 220px;
 }
 
 .config-toggle {

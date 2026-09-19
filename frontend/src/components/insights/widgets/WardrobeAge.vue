@@ -7,13 +7,23 @@
 import { computed } from 'vue';
 import type { ChartData, ChartOptions } from 'chart.js';
 import InsightChart from '../InsightChart.vue';
-import { wardrobeAge } from '../../../lib/insights/metrics';
+import { wardrobeAge, type BreakdownMetric } from '../../../lib/insights/metrics';
 import { axisOptions, chartTheme } from '../../../lib/insights/charts';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const rows = computed(() => wardrobeAge(props.data));
+const metric = computed<BreakdownMetric>(() =>
+  props.config.metric === 'spend' ? 'spend' : 'items',
+);
+
+const rows = computed(() => wardrobeAge(props.data, metric.value));
+
+const METRIC_LABELS: Record<BreakdownMetric, string> = {
+  items: 'Items',
+  spend: 'Spend',
+  avg: 'Avg price',
+};
 
 const chartData = computed<ChartData<'bar'>>(() => {
   const t = chartTheme();
@@ -21,7 +31,7 @@ const chartData = computed<ChartData<'bar'>>(() => {
     labels: rows.value.map(r => r.label),
     datasets: [
       {
-        label: 'Items',
+        label: METRIC_LABELS[metric.value],
         data: rows.value.map(r => r.value),
         backgroundColor: t.tertiary,
         borderRadius: 6,

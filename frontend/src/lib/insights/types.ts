@@ -35,10 +35,36 @@ export interface ConfigOption {
   label: string;
 }
 
+/** Optional condition: only render the field when another config value matches. */
+export interface ConfigFieldCondition {
+  key: string;
+  equals: string | number;
+}
+
 export type ConfigField =
-  | { key: string; label: string; kind: 'select'; options: ConfigOption[] }
-  | { key: string; label: string; kind: 'number'; min: number; max: number; step?: number }
-  | { key: string; label: string; kind: 'toggle' };
+  | { key: string; label: string; kind: 'select'; options: ConfigOption[]; showWhen?: ConfigFieldCondition }
+  | { key: string; label: string; kind: 'number'; min: number; max: number; step?: number; showWhen?: ConfigFieldCondition }
+  | { key: string; label: string; kind: 'toggle'; showWhen?: ConfigFieldCondition }
+  /** Single item picker. Value is an item id; '' means "all items". Options come from the dataset. */
+  | { key: string; label: string; kind: 'item-select'; showWhen?: ConfigFieldCondition }
+  /** Single category picker. Value is a category id (string); '' means "all". Options come from the dataset. */
+  | { key: string; label: string; kind: 'category-select'; showWhen?: ConfigFieldCondition }
+  /**
+   * Single subcategory picker. Value is a subcategory id (string); '' means "all".
+   * Options come from the dataset; when `dependsOn` names a category field, only
+   * subcategories of the currently selected category are shown.
+   */
+  | { key: string; label: string; kind: 'subcategory-select'; dependsOn?: string; showWhen?: ConfigFieldCondition };
+
+/** Per-widget date range presets (narrow the global filter). */
+export type WidgetRange = 'all' | '30d' | '90d' | '1y';
+
+export const RANGE_OPTIONS: ConfigOption[] = [
+  { value: 'all', label: 'All time' },
+  { value: '30d', label: 'Last 30 days' },
+  { value: '90d', label: 'Last 90 days' },
+  { value: '1y', label: 'Last year' },
+];
 
 export interface WidgetDef {
   type: string;

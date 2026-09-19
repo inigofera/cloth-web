@@ -1,6 +1,6 @@
 <template>
   <div v-if="slices.length" class="color-list">
-    <div v-for="s in slices.slice(0, 10)" :key="s.label" class="color-row">
+    <div v-for="s in slices" :key="s.label" class="color-row">
       <span class="color-swatch" :style="{ background: s.hex || 'var(--md-surface-container-highest)' }"></span>
       <span class="color-name">{{ s.label }}</span>
       <div class="color-bar">
@@ -8,7 +8,6 @@
       </div>
       <span class="color-count">{{ s.value }}</span>
     </div>
-    <div v-if="slices.length > 10" class="color-more">+{{ slices.length - 10 }} more</div>
   </div>
   <div v-else class="widget-empty">No items yet.</div>
 </template>
@@ -16,12 +15,21 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import MiniBar from '../MiniBar.vue';
-import { colorBreakdown } from '../../../lib/insights/metrics';
+import { colorBreakdown, type BreakdownMetric } from '../../../lib/insights/metrics';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const slices = computed(() => colorBreakdown(props.data));
+const metric = computed<BreakdownMetric>(() =>
+  props.config.metric === 'spend' ? 'spend' : 'items',
+);
+
+const topN = computed(() => {
+  const v = Number(props.config.topN);
+  return Number.isFinite(v) && v > 0 ? Math.min(15, Math.round(v)) : 0;
+});
+
+const slices = computed(() => colorBreakdown(props.data, { metric: metric.value, topN: topN.value }));
 </script>
 
 <style scoped>
@@ -68,12 +76,6 @@ const slices = computed(() => colorBreakdown(props.data));
   width: 24px;
   text-align: right;
   flex-shrink: 0;
-}
-
-.color-more {
-  font-size: var(--md-body-small-size);
-  color: var(--md-on-surface-variant);
-  padding-left: 1.6rem;
 }
 
 .widget-empty {

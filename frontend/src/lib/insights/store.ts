@@ -19,16 +19,17 @@ export function newWidgetId(): string {
 export function createInstance(
   type: string,
   catalog: Map<string, WidgetDef>,
-  overrides?: Partial<WidgetInstance>,
+  overrides?: { id?: string; size?: WidgetSize; config?: Record<string, unknown> },
 ): WidgetInstance | null {
   const def = catalog.get(type);
   if (!def) return null;
+  const { config, ...rest } = overrides ?? {};
   return {
     id: newWidgetId(),
     type,
     size: def.defaultSize,
-    config: { ...def.defaultConfig },
-    ...overrides,
+    config: { ...def.defaultConfig, ...config },
+    ...rest,
   };
 }
 

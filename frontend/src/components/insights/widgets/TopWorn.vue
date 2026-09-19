@@ -5,9 +5,9 @@
       <div v-else class="rank-thumb rank-thumb--empty"></div>
       <div class="rank-main">
         <span class="rank-name" :title="r.name">{{ r.name }}</span>
-        <MiniBar :value="r.count" :max="rows[0].count" />
+        <MiniBar :value="barValue(r)" :max="barMax" />
       </div>
-      <span class="rank-count">{{ r.count }}×</span>
+      <span class="rank-count">{{ countLabel(r) }}</span>
     </div>
   </div>
   <div v-else class="widget-empty">No wear data yet.</div>
@@ -16,22 +16,61 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import MiniBar from '../MiniBar.vue';
-import { topWorn } from '../../../lib/insights/metrics';
+import {
+  filterItemsByCategory,
+  parseIdValue,
+  rangeData,
+  topWorn,
+  widgetRange,
+  type RankedItem,
+  type TopWornMetric,
+} from '../../../lib/insights/metrics';
+import { formatNumber1 } from '../../../lib/insights/format';
 import { imageUrl } from '../../../api/client';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
+const data = computed(() => rangeData(props.data, widgetRange(props.config)));
+
+const categoryId = computed(() => parseIdValue(props.config.categoryId));
+const subcategoryId = computed(() => parseIdValue(props.config.subcategoryId));
+const filtered = computed(() => filterItemsByCategory(data.value, categoryId.value, subcategoryId.value));
+
 const n = computed(() => {
   const v = Number(props.config.topN);
-  return Number.isFinite(v) && v > 0 ? Math.min(20, Math.round(v)) : 5;
+  return Number.isFinite(v) && v > 0 ? Math.min(15, Math.round(v)) : 5;
 });
 
 const source = computed<'outfits' | 'wear_count'>(() =>
   props.config.source === 'wear_count' ? 'wear_count' : 'outfits',
 );
 
-const rows = computed(() => topWorn(props.data, n.value, source.value));
+const metric = computed<TopWornMetric>(() =>
+  props.config.metric === 'per_month' ? 'per_month' : 'total',
+);
+
+const minWears = computed(() => {
+  const v = Number(props.config.minWears);
+  return Number.isFinite(v) && v > 0 ? Math.min(50, Math.round(v)) : 0;
+});
+
+const rows = computed(() =>
+  topWorn(filtered.value, n.value, source.value, {
+    metric: metric.value,
+    minWears: minWears.value,
+    fullData: props.data,
+  }),
+);
+
+const perMonth = computed(() => metric.value === 'per_month');
+
+const barValue = (r: RankedItem): number => (perMonth.value ? (r.rate ?? 0) : r.count);
+
+const barMax = computed(() => Math.max(...rows.value.map(barValue), 0));
+
+const countLabel = (r: RankedItem): string =>
+  perMonth.value ? `${formatNumber1(r.rate ?? 0)}/mo` : `${r.count}×`;
 
 function thumb(path: string | null): string | null {
   return imageUrl(path, { width: 56 });

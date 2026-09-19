@@ -12,23 +12,39 @@
       <span class="pair-count">{{ p.count }}×</span>
     </div>
   </div>
-  <div v-else class="widget-empty">Log outfits with two or more items to see pairings.</div>
+  <div v-else class="widget-empty">
+    {{ focusItem ? `No pairings for ${focusItem.name} yet.` : 'Log outfits with two or more items to see pairings.' }}
+  </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue';
 import MiniBar from '../MiniBar.vue';
-import { itemPairings } from '../../../lib/insights/metrics';
+import { itemPairings, rangeData, resolveItem, widgetRange } from '../../../lib/insights/metrics';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
+
+const data = computed(() => rangeData(props.data, widgetRange(props.config)));
 
 const n = computed(() => {
   const v = Number(props.config.topN);
   return Number.isFinite(v) && v > 0 ? Math.min(15, Math.round(v)) : 5;
 });
 
-const rows = computed(() => itemPairings(props.data, n.value));
+const focusItem = computed(() => resolveItem(data.value, props.config, 'focusItem'));
+
+const minCount = computed(() => {
+  const v = Number(props.config.minCount);
+  return Number.isFinite(v) && v > 0 ? Math.min(20, Math.round(v)) : 1;
+});
+
+const rows = computed(() =>
+  itemPairings(data.value, n.value, {
+    focusItemId: focusItem.value?.id ?? null,
+    minCount: minCount.value,
+  }),
+);
 </script>
 
 <style scoped>

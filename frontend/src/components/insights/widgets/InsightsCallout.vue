@@ -9,12 +9,27 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { textInsights } from '../../../lib/insights/metrics';
+import { textInsights, type InsightCategory } from '../../../lib/insights/metrics';
 import type { FilteredData } from '../../../lib/insights/types';
 
 const props = defineProps<{ data: FilteredData; config: Record<string, unknown> }>();
 
-const lines = computed(() => textInsights(props.data));
+const focus = computed<InsightCategory | 'all'>(() => {
+  const v = props.config.focus;
+  return v === 'usage' || v === 'value' || v === 'sustainability' ? v : 'all';
+});
+
+const maxInsights = computed(() => {
+  const v = Number(props.config.maxInsights);
+  return Number.isFinite(v) && v > 0 ? Math.min(12, Math.round(v)) : 6;
+});
+
+const lines = computed(() =>
+  textInsights(props.data)
+    .filter(i => focus.value === 'all' || i.category === focus.value)
+    .slice(0, maxInsights.value)
+    .map(i => i.text),
+);
 </script>
 
 <style scoped>

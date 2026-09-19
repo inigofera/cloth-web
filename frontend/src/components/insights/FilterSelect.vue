@@ -12,7 +12,7 @@
     </button>
 
     <div v-if="open" class="fselect__panel">
-      <label v-for="opt in options" :key="opt.value" class="fselect__option">
+      <label v-for="opt in options" :key="opt.value" class="fselect__option" @click="selectOption(opt.value)">
         <input
           v-if="multi"
           type="checkbox"
@@ -70,6 +70,12 @@ function toggle(value: string) {
     ? props.selected.filter(v => v !== value)
     : [...props.selected, value];
   emit('update', next);
+}
+
+// Single-select options have no checkbox input, so the label click must drive
+// the selection. Multi-select is handled by the checkbox's @change instead.
+function selectOption(value: string) {
+  if (!props.multi) toggle(value);
 }
 
 function onDocMouseDown(e: MouseEvent) {
