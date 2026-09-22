@@ -66,6 +66,15 @@ export function sanitizeText(value: unknown, { max, keepNewlines = false }: Sani
   return cleaned.trim().slice(0, max);
 }
 
+/** Return a canonical option value, or null for blank/unknown input. */
+export function sanitizeOption<T extends string>(
+  value: unknown,
+  options: readonly T[],
+): T | null {
+  const normalized = sanitizeText(value, { max: 100 });
+  return options.includes(normalized as T) ? (normalized as T) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Numbers
 // ---------------------------------------------------------------------------

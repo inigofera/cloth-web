@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   sanitizeText,
+  sanitizeOption,
   sanitizeInt,
   sanitizeDecimal,
   isValidHexColor,
@@ -12,6 +13,9 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_IMAGE_DIMENSION,
 } from './sanitize';
+
+const ORIGINS = ['Bought New', '2nd Hand', 'Gift', 'Borrowed', 'Made Myself'] as const;
+const IMPACTS = ['Nothing', 'Low', 'Medium', 'High'] as const;
 
 // ---------------------------------------------------------------------------
 // Text
@@ -34,6 +38,19 @@ describe('sanitizeText', () => {
   it('returns empty for non-strings', () => {
     expect(sanitizeText(null, { max: 10 })).toBe('');
     expect(sanitizeText(42, { max: 10 })).toBe('');
+  });
+});
+
+describe('sanitizeOption', () => {
+  it('accepts only canonical values', () => {
+    expect(sanitizeOption('Gift', ORIGINS)).toBe('Gift');
+    expect(sanitizeOption('High', IMPACTS)).toBe('High');
+  });
+
+  it('maps blank and unknown values to null', () => {
+    expect(sanitizeOption('', ORIGINS)).toBeNull();
+    expect(sanitizeOption('Spain', ORIGINS)).toBeNull();
+    expect(sanitizeOption('high', IMPACTS)).toBeNull();
   });
 });
 

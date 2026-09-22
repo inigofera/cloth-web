@@ -146,13 +146,23 @@
 
     <label class="field">
       <span class="field-label">Origin</span>
-      <input v-model="form.origin" type="text" placeholder="e.g. Spain" />
+      <select v-model="form.origin">
+        <option value="">—</option>
+        <option v-for="origin in ORIGIN_OPTIONS" :key="origin" :value="origin">
+          {{ origin }}
+        </option>
+      </select>
     </label>
 
     <div class="field-row">
       <label class="field">
         <span class="field-label">Laundry impact</span>
-        <input v-model="form.laundry_impact" type="text" placeholder="e.g. Low" />
+        <select v-model="form.laundry_impact">
+          <option value="">—</option>
+          <option v-for="impact in LAUNDRY_IMPACT_OPTIONS" :key="impact" :value="impact">
+            {{ impact }}
+          </option>
+        </select>
       </label>
 
       <label class="field">
@@ -207,6 +217,8 @@ import {
 } from '../lib/sanitize';
 import {
   NEW_OPTION,
+  ORIGIN_OPTIONS,
+  LAUNDRY_IMPACT_OPTIONS,
   type Brand,
   type ClothingCategory,
   type ClothingItemFormState,

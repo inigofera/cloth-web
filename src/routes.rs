@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Row};
+use sqlx::{FromRow, Row, Error as SqlxError};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -90,6 +90,16 @@ async fn table_column_names(
 
 fn quote_ident(table: &str) -> String {
     table.replace('"', "\"")
+}
+
+fn db_write_error(error: SqlxError) -> (StatusCode, String) {
+    if let SqlxError::Database(database_error) = &error {
+        if database_error.code().as_deref() == Some("23514") {
+            return (StatusCode::BAD_REQUEST, "value violates a field constraint".into());
+        }
+    }
+    eprintln!("database write failed: {error}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "database write failed".into())
 }
 
 pub async fn get_table_rows(
@@ -180,7 +190,7 @@ pub async fn insert_table_row(
         .bind(payload)
         .fetch_optional(&state.db)
         .await
-        .unwrap();
+        .map_err(db_write_error)?;
 
     Ok(Json(row.map(|t| t.0)))
 }
@@ -278,7 +288,7 @@ pub async fn update_table_row(
         .bind(user_id)
         .fetch_optional(&state.db)
         .await
-        .unwrap();
+        .map_err(db_write_error)?;
 
     Ok(Json(row.map(|t| t.0)))
 }

@@ -2,6 +2,18 @@ export type UUID = string;
 
 export const NEW_OPTION = '__add__';
 
+export const ORIGIN_OPTIONS = [
+  'Bought New',
+  '2nd Hand',
+  'Gift',
+  'Borrowed',
+  'Made Myself'
+] as const;
+export type Origin = (typeof ORIGIN_OPTIONS)[number];
+
+export const LAUNDRY_IMPACT_OPTIONS = ['Nothing', 'Low', 'Medium', 'High'] as const;
+export type LaundryImpact = (typeof LAUNDRY_IMPACT_OPTIONS)[number];
+
 export interface ClothingItemFormState {
   name: string;
   category_id: number | string | null;
@@ -10,8 +22,8 @@ export interface ClothingItemFormState {
   brand_id: string | null;
   purchase_price: number | null;
   owned_since: string;
-  origin: string;
-  laundry_impact: string;
+  origin: Origin | '';
+  laundry_impact: LaundryImpact | '';
   wear_count: number | null;
   repairable: boolean;
   is_active: boolean;
@@ -36,8 +48,8 @@ export interface ClothingItem {
   brand_id: UUID | null;
   purchase_price: number | null;
   owned_since: string | null;
-  origin: string | null;
-  laundry_impact: string | null;
+  origin: Origin | null;
+  laundry_impact: LaundryImpact | null;
   repairable: boolean | null;
   notes: string | null;
   image_path: string | null;
@@ -56,8 +68,8 @@ export interface CreateClothingItemPayload {
   brand_id?: UUID | null;
   purchase_price?: number | null;
   owned_since?: string | null;
-  origin?: string | null;
-  laundry_impact?: string | null;
+  origin?: Origin | null;
+  laundry_impact?: LaundryImpact | null;
   repairable?: boolean;
   notes?: string | null;
   image_path?: string | null;

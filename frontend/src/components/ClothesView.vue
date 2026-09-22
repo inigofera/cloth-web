@@ -267,13 +267,12 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
 import {
   sanitizeText,
+  sanitizeOption,
   sanitizeInt,
   sanitizeDecimal,
   isValidDate,
   NAME_MAX,
   NOTES_MAX,
-  ORIGIN_MAX,
-  LAUNDRY_MAX,
   PRICE_MAX,
   WEAR_MAX,
 } from '../lib/sanitize';
@@ -281,12 +280,16 @@ import { MdButton } from '../ui';
 import ClothingItemForm from './ClothingItemForm.vue';
 import {
   NEW_OPTION,
+  ORIGIN_OPTIONS,
+  LAUNDRY_IMPACT_OPTIONS,
   type Brand,
   type ClothingCategory,
   type ClothingItem,
   type ClothingItemFormState,
   type ClothingSubcategory,
-  type Color
+  type Color,
+  type Origin,
+  type LaundryImpact
 } from '../api/types';
 
 const loading = ref(true);
@@ -404,8 +407,8 @@ function sanitizeItemFields(f: ClothingItemFormState) {
     brand_id: f.brand_id === NEW_OPTION ? null : f.brand_id,
     purchase_price: sanitizeDecimal(f.purchase_price, { min: 0, max: PRICE_MAX, dp: 2 }),
     owned_since: isValidDate(f.owned_since) ? f.owned_since : null,
-    origin: sanitizeText(f.origin, { max: ORIGIN_MAX }) || null,
-    laundry_impact: sanitizeText(f.laundry_impact, { max: LAUNDRY_MAX }) || null,
+    origin: sanitizeOption<Origin>(f.origin, ORIGIN_OPTIONS),
+    laundry_impact: sanitizeOption<LaundryImpact>(f.laundry_impact, LAUNDRY_IMPACT_OPTIONS),
     wear_count: sanitizeInt(f.wear_count, { min: 0, max: WEAR_MAX }),
     repairable: f.repairable,
     is_active: f.is_active,
