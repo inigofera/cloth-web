@@ -132,6 +132,9 @@
               autofocus
               @keydown.esc="brandDropdownOpen = false"
             />
+            <button type="button" class="brand-option add-brand-option" @click="selectBrand(NEW_OPTION)">
+              + Add new…
+            </button>
             <button type="button" class="brand-option" @click="selectBrand(null)">—</button>
             <button
               v-for="b in filteredBrands"
@@ -142,9 +145,6 @@
               @click="selectBrand(b.id)"
             >
               {{ b.name }}
-            </button>
-            <button type="button" class="brand-option add-brand-option" @click="selectBrand(NEW_OPTION)">
-              + Add new…
             </button>
             <span v-if="filteredBrands.length === 0" class="brand-empty">No brands found</span>
           </div>
