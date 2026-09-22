@@ -111,9 +111,16 @@
 
       <div class="field">
         <span class="field-label">Brand</span>
+        <input
+          v-model="brandSearch"
+          type="search"
+          class="brand-search"
+          placeholder="Search brands…"
+          aria-label="Search brands"
+        />
         <select v-model="form.brand_id">
           <option :value="null">—</option>
-          <option v-for="b in brands" :key="b.id" :value="b.id">
+          <option v-for="b in filteredBrands" :key="b.id" :value="b.id">
             {{ b.name }}
           </option>
           <option :value="NEW_OPTION">+ Add new…</option>
@@ -268,6 +275,7 @@ const addingColor = ref(false);
 const addingCategory = ref(false);
 const addingSubcategory = ref(false);
 const addingBrand = ref(false);
+const brandSearch = ref('');
 
 async function onImageChange(event: Event) {
   const target = event.target as HTMLInputElement;
@@ -296,6 +304,15 @@ function formatSize(bytes: number): string {
 const subcategoriesForSelection = computed(() => {
   if (typeof props.form.category_id !== 'number') return [];
   return props.subcategories.filter(s => s.category_id === props.form.category_id);
+});
+
+const filteredBrands = computed(() => {
+  const query = brandSearch.value.trim().toLowerCase();
+  if (!query) return props.brands;
+
+  return props.brands.filter(brand =>
+    brand.name.toLowerCase().includes(query) || brand.id === props.form.brand_id
+  );
 });
 
 async function addColor() {
@@ -401,6 +418,7 @@ function clearTransient() {
   newCategory.name = '';
   newSubcategory.name = '';
   newBrand.name = '';
+  brandSearch.value = '';
   imageFile.value = null;
   imageError.value = null;
 }
@@ -444,6 +462,7 @@ defineExpose({ imageFile, clearTransient });
 }
 
 .field input[type='text'],
+.field input[type='search'],
 .field input[type='number'],
 .field input[type='date'],
 .field select,
@@ -465,6 +484,10 @@ defineExpose({ imageFile, clearTransient });
 .field select:disabled {
   background: #f0f0f0;
   color: #999;
+}
+
+.brand-search {
+  margin-bottom: 0.4rem;
 }
 
 .file-input {
