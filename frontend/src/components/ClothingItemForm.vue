@@ -111,20 +111,44 @@
 
       <div class="field">
         <span class="field-label">Brand</span>
-        <input
-          v-model="brandSearch"
-          type="search"
-          class="brand-search"
-          placeholder="Search brands…"
-          aria-label="Search brands"
-        />
-        <select v-model="form.brand_id">
-          <option :value="null">—</option>
-          <option v-for="b in filteredBrands" :key="b.id" :value="b.id">
-            {{ b.name }}
-          </option>
-          <option :value="NEW_OPTION">+ Add new…</option>
-        </select>
+        <div class="brand-select">
+          <button
+            type="button"
+            class="brand-select-trigger"
+            :aria-expanded="brandDropdownOpen"
+            aria-haspopup="listbox"
+            @click="brandDropdownOpen = !brandDropdownOpen"
+          >
+            <span>{{ selectedBrandName || '—' }}</span>
+            <span aria-hidden="true">▾</span>
+          </button>
+          <div v-if="brandDropdownOpen" class="brand-dropdown" role="listbox">
+            <input
+              v-model="brandSearch"
+              type="search"
+              class="brand-search"
+              placeholder="Search brands…"
+              aria-label="Search brands"
+              autofocus
+              @keydown.esc="brandDropdownOpen = false"
+            />
+            <button type="button" class="brand-option" @click="selectBrand(null)">—</button>
+            <button
+              v-for="b in filteredBrands"
+              :key="b.id"
+              type="button"
+              class="brand-option"
+              :class="{ selected: form.brand_id === b.id }"
+              @click="selectBrand(b.id)"
+            >
+              {{ b.name }}
+            </button>
+            <button type="button" class="brand-option add-brand-option" @click="selectBrand(NEW_OPTION)">
+              + Add new…
+            </button>
+            <span v-if="filteredBrands.length === 0" class="brand-empty">No brands found</span>
+          </div>
+        </div>
         <div v-if="form.brand_id === NEW_OPTION" class="inline-add">
           <input
             v-model="newBrand.name"
@@ -276,6 +300,7 @@ const addingCategory = ref(false);
 const addingSubcategory = ref(false);
 const addingBrand = ref(false);
 const brandSearch = ref('');
+const brandDropdownOpen = ref(false);
 
 async function onImageChange(event: Event) {
   const target = event.target as HTMLInputElement;
@@ -310,10 +335,19 @@ const filteredBrands = computed(() => {
   const query = brandSearch.value.trim().toLowerCase();
   if (!query) return props.brands;
 
-  return props.brands.filter(brand =>
-    brand.name.toLowerCase().includes(query) || brand.id === props.form.brand_id
-  );
+  return props.brands.filter(brand => brand.name.toLowerCase().includes(query));
 });
+
+const selectedBrandName = computed(() => {
+  if (!props.form.brand_id || props.form.brand_id === NEW_OPTION) return '';
+  return props.brands.find(brand => brand.id === props.form.brand_id)?.name ?? '';
+});
+
+function selectBrand(brandId: string | null | typeof NEW_OPTION) {
+  props.form.brand_id = brandId;
+  brandSearch.value = '';
+  brandDropdownOpen.value = false;
+}
 
 async function addColor() {
   const name = sanitizeText(newColor.name, { max: COLOR_NAME_MAX }).toLowerCase();
@@ -488,6 +522,76 @@ defineExpose({ imageFile, clearTransient });
 
 .brand-search {
   margin-bottom: 0.4rem;
+}
+
+.brand-select {
+  position: relative;
+}
+
+.brand-select-trigger {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.brand-select-trigger:hover,
+.brand-select-trigger:focus {
+  border-color: #007bff;
+}
+
+.brand-dropdown {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 0.2rem);
+  left: 0;
+  right: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+  padding: 0.4rem;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 3px 8px rgb(0 0 0 / 15%);
+}
+
+.brand-option {
+  display: block;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 0;
+  background: #fff;
+  color: #333;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.brand-option:hover,
+.brand-option.selected {
+  background: #e3f2fd;
+}
+
+.add-brand-option {
+  border-top: 1px solid #eee;
+  margin-top: 0.25rem;
+  color: #007bff;
+}
+
+.brand-empty {
+  display: block;
+  padding: 0.4rem 0.5rem;
+  color: #777;
+  font-size: 0.85rem;
 }
 
 .file-input {
