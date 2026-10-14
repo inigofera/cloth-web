@@ -1,7 +1,9 @@
 <template>
   <div class="outfits-view">
     <div v-if="loading" class="loading">Loading outfits...</div>
-    <div v-else-if="loadError" class="error">{{ loadError }}</div>
+    <div v-else-if="loadError" class="error-wrapper">
+      <ErrorDisplay :message="loadError" type="network" can-retry @retry="loadData" />
+    </div>
 
     <div v-else class="layout">
       <section class="calendar-section">
@@ -45,6 +47,14 @@
       </section>
 
       <aside class="day-panel">
+        <ErrorDisplay
+          v-if="actionError"
+          :message="actionError"
+          dismissible
+          class="panel-error"
+          @dismiss="actionError = null"
+        />
+
         <template v-if="selectedDate">
           <h3 class="day-title">{{ selectedDateLabel }}</h3>
 
@@ -113,6 +123,8 @@
 import { ref, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
+import { ErrorDisplay } from '../ui';
+import { classifyError } from '../lib/errors';
 import type { ClothingItem, Outfit } from '../api/types';
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -127,6 +139,7 @@ interface CalendarCell {
 
 const loading = ref(true);
 const loadError = ref<string | null>(null);
+const actionError = ref<string | null>(null);
 const outfits = ref<Outfit[]>([]);
 const items = ref<ClothingItem[]>([]);
 
@@ -280,24 +293,26 @@ async function submitOutfit() {
     notes.value = '';
     selectedItems.value = [];
   } catch (err) {
-    formError.value = String(err);
+    formError.value = classifyError(err).message;
   } finally {
     saving.value = false;
   }
 }
 
 async function removeOutfit(outfit: Outfit) {
+  actionError.value = null;
   try {
     await api.deleteOutfit(outfit.id);
     outfits.value = outfits.value.filter(o => o.id !== outfit.id);
   } catch (err) {
-    loadError.value = String(err);
+    actionError.value = classifyError(err).message;
   }
 }
 
-onMounted(async () => {
+async function loadData() {
   try {
     loading.value = true;
+    loadError.value = null;
     const [outfitData, itemData] = await Promise.all([
       api.listOutfits(),
       api.getTableRows('clothing-items')
@@ -305,11 +320,13 @@ onMounted(async () => {
     outfits.value = outfitData;
     items.value = Array.isArray(itemData) ? (itemData as ClothingItem[]) : [];
   } catch (err) {
-    loadError.value = String(err);
+    loadError.value = classifyError(err).message;
   } finally {
     loading.value = false;
   }
-});
+}
+
+onMounted(loadData);
 </script>
 
 <style scoped>

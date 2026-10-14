@@ -1,9 +1,19 @@
 <template>
   <div class="clothes-view">
     <div v-if="loading" class="loading">Loading clothes...</div>
-    <div v-else-if="loadError" class="error">{{ loadError }}</div>
+    <div v-else-if="loadError" class="error-wrapper">
+      <ErrorDisplay :message="loadError" type="network" can-retry @retry="loadData" />
+    </div>
 
     <div v-else-if="selectedItem" class="detail-page">
+      <ErrorDisplay
+        v-if="actionError"
+        :message="actionError"
+        :type="actionErrorType"
+        dismissible
+        class="action-error"
+        @dismiss="actionError = null"
+      />
       <button class="back-btn" @click="selectedItemId = null">← Back to clothes</button>
 
       <div class="detail-layout">
@@ -155,6 +165,15 @@
 
     <div v-else class="layout">
       <section class="list-section">
+        <ErrorDisplay
+          v-if="actionError"
+          :message="actionError"
+          :type="actionErrorType"
+          dismissible
+          class="action-error"
+          @dismiss="actionError = null"
+        />
+
         <h2 class="section-title">
           My clothes <span class="count">({{ items.length }})</span>
         </h2>
@@ -276,7 +295,8 @@ import {
   PRICE_MAX,
   WEAR_MAX,
 } from '../lib/sanitize';
-import { MdButton } from '../ui';
+import { MdButton, ErrorDisplay } from '../ui';
+import { classifyError, type ErrorContext } from '../lib/errors';
 import ClothingItemForm from './ClothingItemForm.vue';
 import {
   NEW_OPTION,
@@ -294,6 +314,14 @@ import {
 
 const loading = ref(true);
 const loadError = ref<string | null>(null);
+const actionError = ref<string | null>(null);
+const actionErrorType = ref<ErrorContext['type']>('unknown');
+
+function setActionError(err: unknown) {
+  const c = classifyError(err);
+  actionError.value = c.message;
+  actionErrorType.value = c.type;
+}
 const items = ref<ClothingItem[]>([]);
 const selectedItemId = ref<string | null>(null);
 
@@ -439,7 +467,7 @@ async function submitItem() {
     items.value.unshift(created);
     resetForm();
   } catch (err) {
-    formError.value = String(err);
+    formError.value = classifyError(err).message;
   } finally {
     saving.value = false;
   }
@@ -503,7 +531,7 @@ async function saveEdit() {
     }
     editMode.value = false;
   } catch (err) {
-    formError.value = String(err);
+    formError.value = classifyError(err).message;
   } finally {
     editSaving.value = false;
   }
@@ -523,13 +551,14 @@ async function removeItemAndBack() {
   const item = selectedItem.value;
   if (!item) return;
   deleting.value = true;
+  actionError.value = null;
   try {
     await api.deleteTableRow('clothing-items', item.id);
     items.value = items.value.filter(i => i.id !== item.id);
     selectedItemId.value = null;
     confirmingDelete.value = false;
   } catch (err) {
-    loadError.value = String(err);
+    setActionError(err);
   } finally {
     deleting.value = false;
   }
@@ -539,20 +568,22 @@ async function deactivateSelected() {
   const item = selectedItem.value;
   if (!item) return;
   deactivating.value = true;
+  actionError.value = null;
   try {
     await api.updateTableRow('clothing-items', item.id, { is_active: false });
     item.is_active = false;
     confirmingDelete.value = false;
   } catch (err) {
-    loadError.value = String(err);
+    setActionError(err);
   } finally {
     deactivating.value = false;
   }
 }
 
-onMounted(async () => {
+async function loadData() {
   try {
     loading.value = true;
+    loadError.value = null;
     const [itemData, colorData, categoryData, subcategoryData, brandData] =
       await Promise.all([
         api.listClothingItems(),
@@ -567,11 +598,13 @@ onMounted(async () => {
     subcategories.value = Array.isArray(subcategoryData) ? subcategoryData : [];
     brands.value = Array.isArray(brandData) ? brandData : [];
   } catch (err) {
-    loadError.value = String(err);
+    loadError.value = classifyError(err).message;
   } finally {
     loading.value = false;
   }
-});
+}
+
+onMounted(loadData);
 </script>
 
 <style scoped>

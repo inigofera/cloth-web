@@ -13,5 +13,7 @@ export { default as MdNavDrawer } from './components/MdNavDrawer.vue';
 export { default as MdButton } from './components/MdButton.vue';
 export { default as MdIconButton } from './components/MdIconButton.vue';
 export { default as MdListItem } from './components/MdListItem.vue';
+export { default as ErrorDisplay } from './components/ErrorDisplay.vue';
 export { MdIcon, iconNames, type IconName } from './components/icons';
 export type { DrawerItem } from './types';
+

@@ -53,13 +53,23 @@ export function imageUrl(path: string | null | undefined, opts?: ImageUrlOptions
 }
 
 async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const { data } = await supabase.auth.getSession();
+  let { data } = await supabase.auth.getSession();
   const headers = new Headers(init?.headers);
   if (data.session) {
     headers.set('Authorization', `Bearer ${data.session.access_token}`);
   }
 
-  const res = await fetch(input, { ...init, headers });
+  let res = await fetch(input, { ...init, headers });
+  if (res.status === 401) {
+    // Attempt session refresh if token expired
+    const { data: refreshData } = await supabase.auth.refreshSession();
+    if (refreshData.session) {
+      syncToken(refreshData.session);
+      headers.set('Authorization', `Bearer ${refreshData.session.access_token}`);
+      res = await fetch(input, { ...init, headers });
+    }
+  }
+
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);

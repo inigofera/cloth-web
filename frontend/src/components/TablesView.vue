@@ -1,9 +1,8 @@
 <template>
   <div class="tables-view">
     <div v-if="loading" class="loading">Loading tables...</div>
-
-    <div v-if="error" class="error">
-      <p>API error: {{ error }}</p>
+    <div v-else-if="error" class="error-wrapper">
+      <ErrorDisplay :message="error" type="network" can-retry @retry="loadTables" />
     </div>
 
     <div v-else-if="tableGroups.length > 0" class="tables-container">
@@ -24,6 +23,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { api } from '../api/client';
+import { ErrorDisplay } from '../ui';
+import { classifyError } from '../lib/errors';
 import type { ColumnInfo } from '../api/types';
 import TableView from './TableView.vue';
 
@@ -52,17 +53,20 @@ const tableGroups = computed<TableGroup[]>(() => {
   }));
 });
 
-onMounted(async () => {
+async function loadTables() {
   try {
     loading.value = true;
+    error.value = null;
     const data = await api.listTables();
     allColumns.value = data;
   } catch (err) {
-    error.value = String(err);
+    error.value = classifyError(err).message;
   } finally {
     loading.value = false;
   }
-});
+}
+
+onMounted(loadTables);
 </script>
 
 <style scoped>
