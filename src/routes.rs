@@ -399,7 +399,9 @@ pub struct CreateOutfitRequest {
 }
 
 const OUTFITS_WITH_ITEMS_SQL: &str =
-    "SELECT to_jsonb(o) || jsonb_build_object('items', COALESCE((\n\
+    "SELECT to_jsonb(o) || jsonb_build_object(\n\
+     'date', to_char(o.date, 'YYYY-MM-DD'),\n\
+     'items', COALESCE((\n\
      SELECT jsonb_agg(to_jsonb(ci) ORDER BY ci.name)\n\
      FROM \"outfit-items\" oi\n\
      JOIN \"clothing-items\" ci ON ci.id = oi.clothing_item_id\n\

@@ -191,6 +191,7 @@ import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
 import { ErrorDisplay, Toast } from '../ui';
 import { classifyError } from '../lib/errors';
+import { formatLocalDateKey, parseOutfitDateKey, formatSelectedDateLabel } from '../lib/dates';
 import type { ClothingCategory, ClothingItem, Outfit } from '../api/types';
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -254,16 +255,12 @@ const selectedItems = ref<string[]>([]);
 const saving = ref(false);
 const formError = ref<string | null>(null);
 
-function pad(n: number): string {
-  return n.toString().padStart(2, '0');
-}
-
 function dateKey(d: Date): string {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return formatLocalDateKey(d);
 }
 
 function outfitKey(o: Outfit): string {
-  return new Date(o.date).toISOString().slice(0, 10);
+  return parseOutfitDateKey(o.date);
 }
 
 const outfitsByDate = computed<Map<string, Outfit[]>>(() => {
@@ -313,14 +310,7 @@ const dayOutfits = computed<Outfit[]>(() => {
 });
 
 const selectedDateLabel = computed(() => {
-  if (!selectedDate.value) return '';
-  const [y, m, d] = selectedDate.value.split('-').map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric'
-  });
+  return formatSelectedDateLabel(selectedDate.value);
 });
 
 function prevMonth() {
@@ -390,7 +380,7 @@ async function submitOutfit() {
       item_ids: selectedItems.value
     });
     outfits.value.push(created);
-    outfits.value.sort((a, b) => a.date.localeCompare(b.date));
+    outfits.value.sort((a, b) => outfitKey(a).localeCompare(outfitKey(b)));
     notes.value = '';
     selectedItems.value = [];
   } catch (err) {

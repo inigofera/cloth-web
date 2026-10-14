@@ -58,6 +58,7 @@ import WidgetPalette from './insights/WidgetPalette.vue';
 import { WIDGET_CATALOG } from '../lib/insights/catalog';
 import { applyFilters } from '../lib/insights/metrics';
 import { createInstance, defaultLayout, loadLayout, saveLayout } from '../lib/insights/store';
+import { parseOutfitDateKey } from '../lib/dates';
 import {
   DEFAULT_FILTERS,
   type EnrichedItem,
@@ -189,7 +190,7 @@ function buildDataset(
   const outfits: EnrichedOutfit[] = rawOutfits.map(o => ({
     id: o.id,
     date: o.date,
-    dateKey: new Date(o.date).toISOString().slice(0, 10),
+    dateKey: parseOutfitDateKey(o.date),
     notes: o.notes,
     items: o.items.map(enrich),
   }));
