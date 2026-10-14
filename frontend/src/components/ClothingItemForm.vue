@@ -10,7 +10,6 @@
     <label class="field">
       <span class="field-label">Image</span>
       <input
-        :value="imageFile?.name ?? ''"
         type="file"
         accept="image/jpeg,image/png,image/webp,image/gif"
         class="file-input"

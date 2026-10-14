@@ -116,13 +116,13 @@ pub async fn get_table_rows(
 
     let rows = if has_user_id {
         let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t WHERE t.user_id = $1 ORDER BY 1 LIMIT 100",
+            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t WHERE t.user_id = $1 ORDER BY 1 LIMIT 500",
             quoted_table
         );
         sqlx::query(&query).bind(user_id).fetch_all(&state.db).await.unwrap()
     } else {
         let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t ORDER BY 1 LIMIT 100",
+            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t ORDER BY 1 LIMIT 500",
             quoted_table
         );
         sqlx::query(&query).fetch_all(&state.db).await.unwrap()

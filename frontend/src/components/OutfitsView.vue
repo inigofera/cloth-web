@@ -110,23 +110,54 @@
 
             <div class="field">
               <span class="field-label">Items ({{ selectedItems.length }} selected)</span>
+
+              <div v-if="selectedItems.length > 0" class="selected-chips">
+                <span
+                  v-for="id in selectedItems"
+                  :key="id"
+                  class="selected-chip"
+                >
+                  {{ getItemName(id) }}
+                  <button
+                    type="button"
+                    class="remove-chip-btn"
+                    aria-label="Remove item"
+                    @click="removeItemFromSelection(id)"
+                  >✕</button>
+                </span>
+              </div>
+
+              <div class="picker-controls">
+                <input
+                  v-model="pickerSearch"
+                  type="search"
+                  class="picker-search-input"
+                  placeholder="Search items…"
+                />
+                <select v-if="categories.length > 0" v-model="pickerCategory" class="picker-cat-select">
+                  <option :value="null">All categories</option>
+                  <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                </select>
+              </div>
+
               <div class="item-picker">
                 <label
-                  v-for="item in items"
+                  v-for="item in filteredPickerItems"
                   :key="item.id"
                   class="item-option"
-                  :class="{ checked: selectedItems.includes(item.id) }"
+                  :class="{ checked: selectedItems.includes(item.id), inactive: !item.is_active }"
                 >
                   <input
                     v-model="selectedItems"
                     type="checkbox"
                     :value="item.id"
                   />
-                    <img v-if="imageUrl(item.image_path, { width: 56 })" :src="imageUrl(item.image_path, { width: 56 })" class="thumb" />
+                  <img v-if="imageUrl(item.image_path, { width: 56 })" :src="imageUrl(item.image_path, { width: 56 })" class="thumb" loading="lazy" />
                   <span class="item-name">{{ item.name }}</span>
+                  <span v-if="!item.is_active" class="picker-inactive-tag">Inactive</span>
                 </label>
-                <div v-if="items.length === 0" class="picker-empty">
-                  No clothing items yet
+                <div v-if="filteredPickerItems.length === 0" class="picker-empty">
+                  {{ items.length === 0 ? 'No clothing items yet' : 'No items match your search' }}
                 </div>
               </div>
             </div>
@@ -160,7 +191,7 @@ import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
 import { ErrorDisplay, Toast } from '../ui';
 import { classifyError } from '../lib/errors';
-import type { ClothingItem, Outfit } from '../api/types';
+import type { ClothingCategory, ClothingItem, Outfit } from '../api/types';
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -177,6 +208,36 @@ const loadError = ref<string | null>(null);
 const actionError = ref<string | null>(null);
 const outfits = ref<Outfit[]>([]);
 const items = ref<ClothingItem[]>([]);
+const categories = ref<ClothingCategory[]>([]);
+
+const pickerSearch = ref('');
+const pickerCategory = ref<number | null>(null);
+
+function getItemName(id: string): string {
+  return items.value.find(i => i.id === id)?.name ?? 'Item';
+}
+
+function removeItemFromSelection(id: string) {
+  selectedItems.value = selectedItems.value.filter(itemId => itemId !== id);
+}
+
+const filteredPickerItems = computed(() => {
+  const q = pickerSearch.value.trim().toLowerCase();
+  const cat = pickerCategory.value;
+
+  return items.value.filter(item => {
+    if (cat !== null && item.category_id !== cat) {
+      return false;
+    }
+    if (q) {
+      const matchName = item.name.toLowerCase().includes(q);
+      const matchNotes = item.notes?.toLowerCase().includes(q);
+      const matchColor = item.color_id?.toLowerCase().includes(q);
+      return matchName || matchNotes || matchColor;
+    }
+    return true;
+  });
+});
 
 const confirmingDeleteId = ref<string | null>(null);
 const deletingId = ref<string | null>(null);
@@ -359,12 +420,14 @@ async function loadData() {
   try {
     loading.value = true;
     loadError.value = null;
-    const [outfitData, itemData] = await Promise.all([
+    const [outfitData, itemData, categoryData] = await Promise.all([
       api.listOutfits(),
-      api.getTableRows('clothing-items')
+      api.getTableRows('clothing-items'),
+      api.listCategories()
     ]);
     outfits.value = outfitData;
     items.value = Array.isArray(itemData) ? (itemData as ClothingItem[]) : [];
+    categories.value = Array.isArray(categoryData) ? categoryData : [];
   } catch (err) {
     loadError.value = classifyError(err).message;
   } finally {
@@ -679,6 +742,75 @@ onMounted(loadData);
   font-style: italic;
   text-align: center;
   padding: 0.5rem 0;
+}
+
+.selected-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.selected-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  background: #e3f2fd;
+  color: #0b57d0;
+  border: 1px solid #90caf9;
+  border-radius: 4px;
+  padding: 0.15rem 0.45rem;
+}
+
+.remove-chip-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.remove-chip-btn:hover {
+  color: #c0392b;
+}
+
+.picker-controls {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.picker-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.82rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.picker-cat-select {
+  padding: 0.35rem 0.4rem;
+  font-size: 0.82rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  max-width: 120px;
+}
+
+.picker-inactive-tag {
+  font-size: 0.68rem;
+  color: #888;
+  background: #eee;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.item-option.inactive {
+  opacity: 0.7;
 }
 
 .item-option {

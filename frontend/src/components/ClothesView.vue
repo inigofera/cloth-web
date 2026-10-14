@@ -178,13 +178,45 @@
           My clothes <span class="count">({{ items.length }})</span>
         </h2>
 
+        <div class="clothes-search-bar">
+          <input
+            v-model="clothesSearch"
+            type="search"
+            class="clothes-search-input"
+            placeholder="Search clothes by name, brand, or notes…"
+          />
+          <div v-if="categories.length > 0" class="category-pills">
+            <button
+              type="button"
+              class="cat-pill"
+              :class="{ active: clothesCategoryFilter === null }"
+              @click="clothesCategoryFilter = null"
+            >
+              All ({{ items.length }})
+            </button>
+            <button
+              v-for="cat in categories"
+              :key="cat.id"
+              type="button"
+              class="cat-pill"
+              :class="{ active: clothesCategoryFilter === cat.id }"
+              @click="clothesCategoryFilter = cat.id"
+            >
+              {{ cat.name }}
+            </button>
+          </div>
+        </div>
+
         <div v-if="items.length === 0" class="empty">
           No clothing items yet. Add your first one with the form.
+        </div>
+        <div v-else-if="filteredClothesItems.length === 0" class="empty">
+          No clothing items match your search.
         </div>
 
         <div v-else class="items-grid">
           <div
-            v-for="item in items"
+            v-for="item in filteredClothesItems"
             :key="item.id"
             class="item-card clickable"
             @click="openItem(item)"
@@ -193,7 +225,9 @@
               <img
                 v-if="imageUrl(item.image_path, { width: 480 })"
                 :src="imageUrl(item.image_path, { width: 480 })"
+                :alt="item.name"
                 class="item-image"
+                loading="lazy"
               />
               <div v-else class="item-image placeholder">
                 <span>No image</span>
@@ -340,6 +374,27 @@ const selectedItemId = ref<string | null>(null);
 const selectedItem = computed(
   () => items.value.find(i => i.id === selectedItemId.value) ?? null
 );
+
+const clothesSearch = ref('');
+const clothesCategoryFilter = ref<number | null>(null);
+
+const filteredClothesItems = computed(() => {
+  const q = clothesSearch.value.trim().toLowerCase();
+  const cat = clothesCategoryFilter.value;
+
+  return items.value.filter(item => {
+    if (cat !== null && item.category_id !== cat) {
+      return false;
+    }
+    if (q) {
+      const matchName = item.name.toLowerCase().includes(q);
+      const matchNotes = item.notes?.toLowerCase().includes(q);
+      const matchBrand = brandName(item.brand_id)?.toLowerCase().includes(q);
+      return matchName || matchNotes || Boolean(matchBrand);
+    }
+    return true;
+  });
+});
 
 const colors = ref<Color[]>([]);
 const categories = ref<ClothingCategory[]>([]);
@@ -688,6 +743,49 @@ onMounted(loadData);
   font-size: 1rem;
   color: #666;
   font-weight: 400;
+}
+
+.clothes-search-bar {
+  margin-bottom: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.clothes-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.cat-pill {
+  padding: 0.25rem 0.65rem;
+  border: 1px solid #ccc;
+  border-radius: 16px;
+  background: #fff;
+  color: #555;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cat-pill:hover {
+  background: #f0f0f0;
+}
+
+.cat-pill.active {
+  background: var(--md-primary, #6750a4);
+  color: #fff;
+  border-color: var(--md-primary, #6750a4);
 }
 
 .empty {
