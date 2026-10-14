@@ -67,7 +67,36 @@
                 <span v-if="outfit.items.length === 0" class="item-tag empty">no items</span>
               </div>
               <p v-if="outfit.notes" class="outfit-notes">{{ outfit.notes }}</p>
-              <button class="delete-btn" @click="removeOutfit(outfit)">Delete</button>
+
+              <div v-if="confirmingDeleteId === outfit.id" class="confirm-delete">
+                <span class="confirm-prompt">Delete this outfit?</span>
+                <div class="confirm-buttons">
+                  <button
+                    type="button"
+                    class="confirm-btn danger"
+                    :disabled="deletingId === outfit.id"
+                    @click="removeOutfit(outfit)"
+                  >
+                    {{ deletingId === outfit.id ? 'Deleting…' : 'Yes, delete' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="confirm-btn secondary"
+                    :disabled="deletingId === outfit.id"
+                    @click="confirmingDeleteId = null"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <button
+                v-else
+                type="button"
+                class="delete-btn"
+                @click="confirmingDeleteId = outfit.id"
+              >
+                Delete
+              </button>
             </div>
           </div>
 
@@ -105,7 +134,11 @@
             <div v-if="formError" class="error">{{ formError }}</div>
 
             <div class="form-actions">
-              <button type="submit" class="primary" :disabled="saving">
+              <button
+                type="submit"
+                class="primary"
+                :disabled="saving || (selectedItems.length === 0 && !notes.trim())"
+              >
                 {{ saving ? 'Saving…' : 'Add outfit' }}
               </button>
               <button type="button" class="secondary" @click="closeForm">Cancel</button>
@@ -116,6 +149,8 @@
         <div v-else class="hint">Select a day on the calendar to add an outfit.</div>
       </aside>
     </div>
+
+    <Toast v-model:show="showToast" :message="toastMessage" />
   </div>
 </template>
 
@@ -123,7 +158,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
-import { ErrorDisplay } from '../ui';
+import { ErrorDisplay, Toast } from '../ui';
 import { classifyError } from '../lib/errors';
 import type { ClothingItem, Outfit } from '../api/types';
 
@@ -142,6 +177,11 @@ const loadError = ref<string | null>(null);
 const actionError = ref<string | null>(null);
 const outfits = ref<Outfit[]>([]);
 const items = ref<ClothingItem[]>([]);
+
+const confirmingDeleteId = ref<string | null>(null);
+const deletingId = ref<string | null>(null);
+const showToast = ref(false);
+const toastMessage = ref('');
 
 const now = new Date();
 const viewYear = ref(now.getFullYear());
@@ -301,11 +341,17 @@ async function submitOutfit() {
 
 async function removeOutfit(outfit: Outfit) {
   actionError.value = null;
+  deletingId.value = outfit.id;
   try {
     await api.deleteOutfit(outfit.id);
     outfits.value = outfits.value.filter(o => o.id !== outfit.id);
+    confirmingDeleteId.value = null;
+    toastMessage.value = 'Outfit deleted.';
+    showToast.value = true;
   } catch (err) {
     actionError.value = classifyError(err).message;
+  } finally {
+    deletingId.value = null;
   }
 }
 
@@ -536,6 +582,51 @@ onMounted(loadData);
 
 .delete-btn:hover {
   background: #fdecea;
+}
+
+.confirm-delete {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: #fdecea;
+  border: 1px solid #e0b4ae;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.confirm-prompt {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #c0392b;
+}
+
+.confirm-buttons {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.confirm-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  border-radius: 3px;
+  border: 1px solid #ccc;
+  background: #fff;
+  cursor: pointer;
+}
+
+.confirm-btn.danger {
+  background: #c0392b;
+  color: #fff;
+  border-color: #c0392b;
+}
+
+.confirm-btn.danger:hover {
+  background: #a93226;
+}
+
+.confirm-btn.secondary:hover {
+  background: #f5f5f5;
 }
 
 .add-form {

@@ -11,8 +11,15 @@
         @nav-click="drawerOpen = !drawerOpen"
       >
         <template #actions>
-          <span class="who">{{ user?.email }}</span>
-          <MdButton variant="text" @click="signOut">Sign out</MdButton>
+          <template v-if="confirmingSignOut">
+            <span class="signout-prompt">Sign out?</span>
+            <MdButton variant="text" @click="handleSignOut">Yes, sign out</MdButton>
+            <MdButton variant="text" @click="confirmingSignOut = false">Cancel</MdButton>
+          </template>
+          <template v-else>
+            <span class="who" :title="user?.email">{{ user?.email }}</span>
+            <MdButton variant="text" @click="confirmingSignOut = true">Sign out</MdButton>
+          </template>
         </template>
       </MdAppBar>
 
@@ -61,6 +68,12 @@ type TabId = (typeof navItems)[number]['id'];
 
 const activeTab = ref<TabId>('outfits');
 const drawerOpen = ref(true);
+const confirmingSignOut = ref(false);
+
+async function handleSignOut() {
+  confirmingSignOut.value = false;
+  await signOut();
+}
 </script>
 
 <style scoped>
@@ -68,6 +81,12 @@ const drawerOpen = ref(true);
   display: flex;
   flex-direction: column;
   height: 100vh;
+}
+
+.signout-prompt {
+  color: var(--md-error, #b3261e);
+  font-size: var(--md-body-medium-size);
+  font-weight: 600;
 }
 
 .loading {

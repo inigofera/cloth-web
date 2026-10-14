@@ -7,8 +7,15 @@
       <div class="insights-header">
         <h2 class="insights-title">Insights</h2>
         <div class="insights-actions">
-          <MdButton variant="text" @click="resetLayout">Reset layout</MdButton>
-          <MdButton variant="tonal" @click="paletteOpen = true">Add widget</MdButton>
+          <template v-if="confirmingReset">
+            <span class="reset-confirm-prompt">Reset widgets to default?</span>
+            <MdButton variant="text" @click="confirmResetLayout">Yes, reset</MdButton>
+            <MdButton variant="text" @click="confirmingReset = false">Cancel</MdButton>
+          </template>
+          <template v-else>
+            <MdButton variant="text" @click="confirmingReset = true">Reset layout</MdButton>
+            <MdButton variant="tonal" @click="paletteOpen = true">Add widget</MdButton>
+          </template>
         </div>
       </div>
 
@@ -126,8 +133,11 @@ function reorderWidgets(from: number, to: number) {
   widgets.value = arr;
 }
 
-function resetLayout() {
+const confirmingReset = ref(false);
+
+function confirmResetLayout() {
   widgets.value = defaultLayout(WIDGET_CATALOG);
+  confirmingReset.value = false;
 }
 
 // ---------------------------------------------------------------------------

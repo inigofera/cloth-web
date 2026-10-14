@@ -278,6 +278,13 @@
         />
       </aside>
     </div>
+
+    <Toast
+      v-model:show="showToast"
+      :message="toastMessage"
+      :undo-action="pendingUndoAction"
+      @undo="handleUndo"
+    />
   </div>
 </template>
 
@@ -295,8 +302,9 @@ import {
   PRICE_MAX,
   WEAR_MAX,
 } from '../lib/sanitize';
-import { MdButton, ErrorDisplay } from '../ui';
+import { MdButton, ErrorDisplay, Toast } from '../ui';
 import { classifyError, type ErrorContext } from '../lib/errors';
+import { undoManager, type UndoAction } from '../lib/undo';
 import ClothingItemForm from './ClothingItemForm.vue';
 import {
   NEW_OPTION,
@@ -316,6 +324,9 @@ const loading = ref(true);
 const loadError = ref<string | null>(null);
 const actionError = ref<string | null>(null);
 const actionErrorType = ref<ErrorContext['type']>('unknown');
+const showToast = ref(false);
+const toastMessage = ref('');
+const pendingUndoAction = ref<UndoAction | null>(null);
 
 function setActionError(err: unknown) {
   const c = classifyError(err);
@@ -557,6 +568,9 @@ async function removeItemAndBack() {
     items.value = items.value.filter(i => i.id !== item.id);
     selectedItemId.value = null;
     confirmingDelete.value = false;
+    toastMessage.value = `Deleted "${item.name}".`;
+    pendingUndoAction.value = null;
+    showToast.value = true;
   } catch (err) {
     setActionError(err);
   } finally {
@@ -573,11 +587,29 @@ async function deactivateSelected() {
     await api.updateTableRow('clothing-items', item.id, { is_active: false });
     item.is_active = false;
     confirmingDelete.value = false;
+    undoManager.registerUndo({
+      type: 'deactivate',
+      itemId: item.id,
+      name: item.name,
+      undo: async () => {
+        await api.updateTableRow('clothing-items', item.id, { is_active: true });
+        item.is_active = true;
+      }
+    });
+    pendingUndoAction.value = undoManager.getPending();
+    toastMessage.value = `Deactivated "${item.name}".`;
+    showToast.value = true;
   } catch (err) {
     setActionError(err);
   } finally {
     deactivating.value = false;
   }
+}
+
+async function handleUndo() {
+  await undoManager.executeUndo();
+  showToast.value = false;
+  pendingUndoAction.value = null;
 }
 
 async function loadData() {
