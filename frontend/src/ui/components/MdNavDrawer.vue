@@ -1,5 +1,10 @@
 <template>
-  <aside class="md-drawer" :class="{ 'md-drawer--closed': !open }">
+  <aside
+    class="md-drawer"
+    :class="{ 'md-drawer--closed': !open }"
+    :aria-hidden="!open"
+    :inert="!open"
+  >
     <div class="md-drawer__inner">
       <div v-if="$slots.header" class="md-drawer__header">
         <slot name="header" />

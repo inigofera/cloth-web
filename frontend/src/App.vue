@@ -24,7 +24,12 @@
       </MdAppBar>
 
       <div class="shell">
-        <MdNavDrawer v-model="activeTab" :open="drawerOpen" :items="navItems">
+        <MdNavDrawer
+          :model-value="activeTab"
+          :open="drawerOpen"
+          :items="navItems"
+          @update:model-value="onSelectTab"
+        >
           <template #header>
             <div class="drawer-brand">
               <span class="drawer-brand__name">Cloth Web</span>
@@ -33,10 +38,12 @@
         </MdNavDrawer>
 
         <main class="content">
-          <ClothesView v-if="activeTab === 'clothes'" />
-          <OutfitsView v-else-if="activeTab === 'outfits'" />
-          <InsightsView v-else-if="activeTab === 'insights'" />
-          <TablesView v-else-if="activeTab === 'tables'" />
+          <KeepAlive>
+            <ClothesView v-if="activeTab === 'clothes'" />
+            <OutfitsView v-else-if="activeTab === 'outfits'" />
+            <InsightsView v-else-if="activeTab === 'insights'" />
+            <TablesView v-else-if="activeTab === 'tables'" />
+          </KeepAlive>
         </main>
       </div>
     </template>
@@ -44,8 +51,9 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, ref } from 'vue';
+import { defineAsyncComponent, ref, onMounted } from 'vue';
 import { useAuth } from './lib/auth';
+import { useRouter, type TabId } from './lib/router';
 import ClothesView from './components/ClothesView.vue';
 import OutfitsView from './components/OutfitsView.vue';
 import TablesView from './components/TablesView.vue';
@@ -56,6 +64,11 @@ import { MdAppBar, MdNavDrawer, MdButton, type DrawerItem } from './ui';
 const InsightsView = defineAsyncComponent(() => import('./components/InsightsView.vue'));
 
 const { session, user, ready, signOut } = useAuth();
+const router = useRouter();
+
+onMounted(() => {
+  router.init();
+});
 
 const navItems: DrawerItem[] = [
   { id: 'clothes', label: 'Clothes', icon: 'grid' },
@@ -64,11 +77,16 @@ const navItems: DrawerItem[] = [
   { id: 'tables', label: 'Tables', icon: 'table' },
 ];
 
-type TabId = (typeof navItems)[number]['id'];
-
-const activeTab = ref<TabId>('outfits');
+const activeTab = router.currentTab;
 const drawerOpen = ref(true);
 const confirmingSignOut = ref(false);
+
+function onSelectTab(id: string) {
+  activeTab.value = id as TabId;
+  if (typeof window !== 'undefined' && window.innerWidth <= 768) {
+    drawerOpen.value = false;
+  }
+}
 
 async function handleSignOut() {
   confirmingSignOut.value = false;

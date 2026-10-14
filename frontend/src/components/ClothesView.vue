@@ -14,7 +14,7 @@
         class="action-error"
         @dismiss="actionError = null"
       />
-      <button class="back-btn" @click="selectedItemId = null">← Back to clothes</button>
+      <button class="back-btn" @click="closeDetail">← Back to clothes</button>
 
       <div class="detail-layout">
         <div class="detail-media">
@@ -289,8 +289,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { api, imageUrl } from '../api/client';
+import { useRouter } from '../lib/router';
 import {
   sanitizeText,
   sanitizeOption,
@@ -484,10 +485,32 @@ async function submitItem() {
   }
 }
 
+const router = useRouter();
+
+watch(
+  () => router.params.value.item,
+  (newItemId) => {
+    if (newItemId) {
+      selectedItemId.value = newItemId;
+    } else if (selectedItemId.value) {
+      selectedItemId.value = null;
+    }
+  },
+  { immediate: true }
+);
+
 function openItem(item: ClothingItem) {
   selectedItemId.value = item.id;
   confirmingDelete.value = false;
   editMode.value = false;
+  router.navigate('clothes', { item: item.id });
+}
+
+function closeDetail() {
+  selectedItemId.value = null;
+  confirmingDelete.value = false;
+  editMode.value = false;
+  router.navigate('clothes');
 }
 
 function startEdit() {
@@ -566,7 +589,7 @@ async function removeItemAndBack() {
   try {
     await api.deleteTableRow('clothing-items', item.id);
     items.value = items.value.filter(i => i.id !== item.id);
-    selectedItemId.value = null;
+    closeDetail();
     confirmingDelete.value = false;
     toastMessage.value = `Deleted "${item.name}".`;
     pendingUndoAction.value = null;
