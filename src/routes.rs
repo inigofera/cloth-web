@@ -30,7 +30,7 @@ pub async fn list_tables(
          FROM information_schema.tables t
          JOIN information_schema.columns c 
            ON t.table_name = c.table_name AND t.table_schema = c.table_schema
-         WHERE t.table_schema = 'public'
+         WHERE t.table_schema = 'public' AND t.table_name != 'user-settings'
          ORDER BY t.table_name, c.ordinal_position"
     )
     .fetch_all(&state.db)
@@ -39,6 +39,11 @@ pub async fn list_tables(
 
     Json(rows)
 }
+
+pub fn is_generic_crud_table_blocked(table: &str) -> bool {
+    table == "user-settings"
+}
+
 
 async fn is_allowed_table(pool: &sqlx::Pool<sqlx::Postgres>, table: &str) -> anyhow::Result<bool> {
     let exists = sqlx::query_scalar::<_, bool>(
@@ -106,9 +111,16 @@ pub async fn get_table_rows(
     State(state): State<Arc<AppState>>,
     Path(table): Path<String>,
     AuthUser(user_id): AuthUser,
-) -> Json<Vec<JsonValue>> {
+) -> Result<Json<Vec<JsonValue>>, (StatusCode, String)> {
+    if is_generic_crud_table_blocked(&table) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access user settings via /settings endpoint".to_string(),
+        ));
+    }
+
     if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Json(vec![]);
+        return Ok(Json(vec![]));
     }
 
     let quoted_table = quote_ident(&table);
@@ -133,7 +145,7 @@ pub async fn get_table_rows(
         .map(|r| r.get::<JsonValue, _>("row"))
         .collect();
 
-    Json(result)
+    Ok(Json(result))
 }
 
 pub async fn insert_table_row(
@@ -142,9 +154,17 @@ pub async fn insert_table_row(
     AuthUser(user_id): AuthUser,
     Json(mut payload): Json<JsonValue>,
 ) -> Result<Json<Option<JsonValue>>, (StatusCode, String)> {
+    if is_generic_crud_table_blocked(&table) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access user settings via /settings endpoint".to_string(),
+        ));
+    }
+
     if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
         return Err((StatusCode::NOT_FOUND, "table not found".into()));
     }
+
     if !table_has_user_id(&state.db, &table).await.unwrap_or(false) {
         return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
     }
@@ -200,6 +220,13 @@ pub async fn delete_table_row(
     Path((table, id)): Path<(String, String)>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<Option<JsonValue>>, (StatusCode, String)> {
+    if is_generic_crud_table_blocked(&table) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access user settings via /settings endpoint".to_string(),
+        ));
+    }
+
     // Outfit deletion must go through DELETE /outfits/:id so wear counts stay in sync.
     if table == "outfits" {
         return Err((
@@ -236,6 +263,13 @@ pub async fn update_table_row(
     AuthUser(user_id): AuthUser,
     Json(payload): Json<JsonValue>,
 ) -> Result<Json<Option<JsonValue>>, (StatusCode, String)> {
+    if is_generic_crud_table_blocked(&table) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access user settings via /settings endpoint".to_string(),
+        ));
+    }
+
     if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
         return Err((StatusCode::NOT_FOUND, "table not found".into()));
     }
@@ -396,6 +430,7 @@ pub struct CreateOutfitRequest {
     pub notes: Option<String>,
     #[serde(default)]
     pub item_ids: Vec<String>,
+    pub image_path: Option<String>,
 }
 
 const OUTFITS_WITH_ITEMS_SQL: &str =
@@ -429,6 +464,10 @@ pub async fn create_outfit(
     AuthUser(user_id): AuthUser,
     Json(req): Json<CreateOutfitRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    if let Some(ref path) = req.image_path {
+        validate_image_path(&serde_json::to_value(path).unwrap(), &user_id)?;
+    }
+
     let mut tx = state
         .db
         .begin()
@@ -436,14 +475,16 @@ pub async fn create_outfit(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let row: (JsonValue,) = sqlx::query_as(
-        "INSERT INTO outfits (user_id, date, notes, is_active, created_at, updated_at) VALUES ($1, $2::timestamptz, $3, true, now(), now()) RETURNING to_jsonb(outfits) AS row",
+        "INSERT INTO outfits (user_id, date, notes, image_path, is_active, created_at, updated_at) VALUES ($1, $2::timestamptz, $3, $4, true, now(), now()) RETURNING to_jsonb(outfits) AS row",
     )
     .bind(user_id)
     .bind(&req.date)
     .bind(&req.notes)
+    .bind(&req.image_path)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create outfit: {e}")))?;
+
 
     let outfit = row.0;
     let outfit_id = outfit
@@ -541,7 +582,728 @@ pub async fn delete_outfit(
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct UserSettingsResponse {
+    pub tryon_provider: String,
+    pub has_api_key: bool,
+    pub api_key_hint: Option<String>,
+    pub local_qwen_url: String,
+    pub reference_image_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    pub tryon_provider: Option<String>,
+    pub api_key: Option<String>,
+    pub local_qwen_url: Option<String>,
+    pub reference_image_path: Option<String>,
+}
+
+pub fn validate_local_qwen_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err("Local Qwen URL cannot be empty".to_string());
+    }
+
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("Invalid URL: {e}"))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("URL scheme must be http or https".to_string());
+    }
+
+    let host = parsed.host_str().ok_or_else(|| "URL must have a host".to_string())?;
+
+    // Block link-local addresses (e.g. AWS/GCP/Azure cloud metadata 169.254.x.x)
+    if host == "169.254.169.254" || host.starts_with("169.254.") {
+        return Err("Link-local addresses (metadata services) are prohibited".to_string());
+    }
+
+    // Default ports: if None, 80 for http, 443 for https
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    if port == 3000 || port == 5432 {
+        return Err(format!("Port {port} is reserved and prohibited"));
+    }
+
+    let allow_lan = std::env::var("ALLOW_LAN_INFERENCE_URLS")
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let is_loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+
+    if is_loopback {
+        return Ok(parsed);
+    }
+
+    if allow_lan {
+        // Check RFC 1918 private LAN addresses
+        let is_lan = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(ipv4) => {
+                    let octets = ipv4.octets();
+                    octets[0] == 10
+                        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                        || (octets[0] == 192 && octets[1] == 168)
+                }
+                std::net::IpAddr::V6(_) => false,
+            }
+        } else {
+            false
+        };
+
+        if is_lan {
+            return Ok(parsed);
+        }
+    }
+
+    Err(
+        "Host must be 127.0.0.1 or localhost (or LAN IP if ALLOW_LAN_INFERENCE_URLS=true)"
+            .to_string(),
+    )
+}
+
+pub async fn get_user_settings(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<UserSettingsResponse>, (StatusCode, String)> {
+    let row: Option<(
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url
+           FROM public."user-settings"
+           WHERE user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to fetch settings: {e}")))?;
+
+    let (has_api_key, api_key_hint, reference_image_path, tryon_provider, local_qwen_url) = match row {
+        Some((Some(enc), Some(nonce), ref_path, provider, qwen_url)) if !enc.is_empty() && !nonce.is_empty() => {
+            let provider = provider.unwrap_or_else(|| "gemini".to_string());
+            let qwen_url = qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
+            match crate::crypto::decrypt_api_key(&enc, &nonce, &state.encryption_key) {
+                Ok(plain) => {
+                    let hint = if plain.chars().count() >= 4 {
+                        let last4: String = plain.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+                        format!("...{last4}")
+                    } else {
+                        format!("...{plain}")
+                    };
+                    drop(plain);
+                    (true, Some(hint), ref_path, provider, qwen_url)
+                }
+                Err(e) => {
+                    eprintln!("Failed to decrypt API key for user {user_id}: {e}");
+                    (false, None, ref_path, provider, qwen_url)
+                }
+            }
+        }
+        Some((_, _, ref_path, provider, qwen_url)) => (
+            false,
+            None,
+            ref_path,
+            provider.unwrap_or_else(|| "gemini".to_string()),
+            qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string()),
+        ),
+        None => (false, None, None, "gemini".to_string(), "http://127.0.0.1:8001".to_string()),
+    };
+
+    Ok(Json(UserSettingsResponse {
+        tryon_provider,
+        has_api_key,
+        api_key_hint,
+        local_qwen_url,
+        reference_image_path,
+    }))
+}
+
+pub async fn update_user_settings(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Json(payload): Json<UpdateSettingsRequest>,
+) -> Result<Json<UserSettingsResponse>, (StatusCode, String)> {
+    let (update_api_key, new_enc, new_nonce) = match payload.api_key {
+        Some(ref key) => {
+            let trimmed = key.trim();
+            if trimmed.is_empty() {
+                (true, None, None)
+            } else {
+                if trimmed.len() < 10 || trimmed.len() > 256 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "API key must be between 10 and 256 characters".to_string(),
+                    ));
+                }
+                let (enc, nonce) = crate::crypto::encrypt_api_key(trimmed, &state.encryption_key)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encryption error: {e}")))?;
+                (true, Some(enc), Some(nonce))
+            }
+        }
+        None => (false, None, None),
+    };
+
+    let (update_ref_path, new_ref_path) = match payload.reference_image_path {
+        Some(ref path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                (true, None)
+            } else {
+                validate_image_path(&serde_json::to_value(trimmed).unwrap(), &user_id)?;
+                (true, Some(trimmed.to_string()))
+            }
+        }
+        None => (false, None),
+    };
+
+    let (update_provider, new_provider) = match payload.tryon_provider {
+        Some(ref p) => {
+            let trimmed = p.trim().to_lowercase();
+            if trimmed != "gemini" && trimmed != "qwen_local" {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "tryon_provider must be either 'gemini' or 'qwen_local'".to_string(),
+                ));
+            }
+            (true, Some(trimmed))
+        }
+        None => (false, None),
+    };
+
+    let (update_qwen_url, new_qwen_url) = match payload.local_qwen_url {
+        Some(ref u) => {
+            let parsed = validate_local_qwen_url(u)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            (true, Some(parsed.to_string().trim_end_matches('/').to_string()))
+        }
+        None => (false, None),
+    };
+
+    sqlx::query(
+        r#"INSERT INTO public."user-settings" (user_id, encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url, updated_at)
+           VALUES ($1, $2, $3, $4, COALESCE($7, 'gemini'), COALESCE($9, 'http://127.0.0.1:8001'), now())
+           ON CONFLICT (user_id) DO UPDATE SET
+               encrypted_api_key = CASE WHEN $5 THEN EXCLUDED.encrypted_api_key ELSE public."user-settings".encrypted_api_key END,
+               api_key_nonce = CASE WHEN $5 THEN EXCLUDED.api_key_nonce ELSE public."user-settings".api_key_nonce END,
+               reference_image_path = CASE WHEN $6 THEN EXCLUDED.reference_image_path ELSE public."user-settings".reference_image_path END,
+               tryon_provider = CASE WHEN $8 THEN EXCLUDED.tryon_provider ELSE public."user-settings".tryon_provider END,
+               local_qwen_url = CASE WHEN $10 THEN EXCLUDED.local_qwen_url ELSE public."user-settings".local_qwen_url END,
+               updated_at = now()"#,
+    )
+    .bind(user_id)
+    .bind(new_enc)
+    .bind(new_nonce)
+    .bind(new_ref_path)
+    .bind(update_api_key)
+    .bind(update_ref_path)
+    .bind(new_provider)
+    .bind(update_provider)
+    .bind(new_qwen_url)
+    .bind(update_qwen_url)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update settings: {e}")))?;
+
+    get_user_settings(State(state), AuthUser(user_id)).await
+}
+
+#[derive(Deserialize)]
+pub struct TestQwenParams {
+    pub url: Option<String>,
+}
+
+pub async fn test_qwen_connection(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Query(params): Query<TestQwenParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let target_url = match params.url {
+        Some(u) if !u.trim().is_empty() => {
+            validate_local_qwen_url(&u).map_err(|e| (StatusCode::BAD_REQUEST, e))?.to_string()
+        }
+        _ => {
+            let row: Option<(Option<String>,)> = sqlx::query_as(
+                r#"SELECT local_qwen_url FROM public."user-settings" WHERE user_id = $1"#,
+            )
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to query settings: {e}")))?;
+
+            let saved_url = row.and_then(|r| r.0).unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
+            validate_local_qwen_url(&saved_url).map_err(|e| (StatusCode::BAD_REQUEST, e))?.to_string()
+        }
+    };
+
+    let base = target_url.trim_end_matches('/');
+    let health_url = format!("{base}/health");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let res = client
+        .get(&health_url)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to connect to local Qwen server at {health_url}: {e}"),
+            )
+        })?;
+
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("Local Qwen server returned error ({status}): {text}"),
+        ));
+    }
+
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid JSON from local Qwen server: {e}")))?;
+
+    Ok(Json(json))
+}
+
+pub fn build_qwen_prompt(items: &[GarmentItemRow]) -> String {
+    let mut prompt = String::from(
+        "Keep the person's identity, face, hair, pose, body proportions, and background from Picture 1 unchanged. \
+         Replace the clothes worn by the person in Picture 1 with the garments shown in the following pictures:\n"
+    );
+
+    for (idx, item) in items.iter().enumerate() {
+        let cat = item.category_name.as_deref().unwrap_or("Uncategorized");
+        let subcat = item.subcategory_name.as_deref().unwrap_or("General");
+        let color = item.color_id.as_deref().unwrap_or("Unspecified");
+        let name = &item.name;
+        prompt.push_str(&format!(
+            "- Picture {}: {} ({}) in {}, \"{}\"\n",
+            idx + 2, cat, subcat, color, name
+        ));
+    }
+
+    prompt.push_str(
+        "Remove any existing clothing in Picture 1 that conflicts with these garments. \
+         Ensure natural fabric drape, realistic lighting, and accurate garment details."
+    );
+
+    prompt
+}
+
+#[derive(Deserialize)]
+pub struct GeneratePreviewRequest {
+    pub item_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct GeneratePreviewResponse {
+    pub image_path: String,
+}
+
+#[derive(FromRow, Clone, Debug)]
+pub struct GarmentItemRow {
+    pub id: Uuid,
+    pub name: String,
+    pub color_id: Option<String>,
+    pub image_path: Option<String>,
+    #[allow(dead_code)]
+    pub notes: Option<String>,
+    pub category_name: Option<String>,
+    pub subcategory_name: Option<String>,
+}
+
+pub async fn generate_outfit_preview(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Json(payload): Json<GeneratePreviewRequest>,
+) -> Result<Json<GeneratePreviewResponse>, (StatusCode, String)> {
+    if payload.item_ids.is_empty() || payload.item_ids.len() > 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "item_ids must contain between 1 and 8 items".to_string(),
+        ));
+    }
+
+    let settings_row: Option<(
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url
+           FROM public."user-settings"
+           WHERE user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to query settings: {e}")))?;
+
+    let reference_image_path = match settings_row.as_ref().and_then(|r| r.2.as_ref()) {
+        Some(p) if !p.trim().is_empty() => p.clone(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Full-body reference photo is not configured in Settings.".to_string(),
+            ));
+        }
+    };
+
+    let tryon_provider = settings_row
+        .as_ref()
+        .and_then(|r| r.3.as_deref())
+        .unwrap_or("gemini")
+        .to_string();
+
+    let local_qwen_url = settings_row
+        .as_ref()
+        .and_then(|r| r.4.as_deref())
+        .unwrap_or("http://127.0.0.1:8001")
+        .to_string();
+
+    let gemini_api_key = if tryon_provider == "gemini" {
+        let (encrypted_api_key, api_key_nonce) = match settings_row.as_ref() {
+            Some((Some(enc), Some(nonce), _, _, _)) if !enc.is_empty() && !nonce.is_empty() => {
+                (enc, nonce)
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Gemini API key is not configured in Settings.".to_string(),
+                ));
+            }
+        };
+        let key = crate::crypto::decrypt_api_key(encrypted_api_key, api_key_nonce, &state.encryption_key)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to decrypt API key: {e}")))?;
+        Some(key)
+    } else {
+        validate_local_qwen_url(&local_qwen_url)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid local Qwen URL: {e}")))?;
+        None
+    };
+
+    let items = sqlx::query_as::<_, GarmentItemRow>(
+        r#"SELECT 
+            ci.id,
+            ci.name,
+            ci.color_id,
+            ci.image_path,
+            ci.notes,
+            cc.name AS category_name,
+            cs.name AS subcategory_name
+        FROM public."clothing-items" ci
+        LEFT JOIN public."clothing-categories" cc ON ci.category_id = cc.id
+        LEFT JOIN public."clothing-subcategories" cs ON ci.subcategory_id = cs.id
+        WHERE ci.id = ANY($1) AND ci.user_id = $2"#,
+    )
+    .bind(&payload.item_ids)
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to query items: {e}")))?;
+
+    for req_id in &payload.item_ids {
+        if !items.iter().any(|item| item.id == *req_id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Item with id '{req_id}' was not found in your wardrobe."),
+            ));
+        }
+    }
+
+    for item in &items {
+        match &item.image_path {
+            Some(path) if !path.trim().is_empty() => {}
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Item '{}' does not have an uploaded photo.", item.name),
+                ));
+            }
+        }
+    }
+
+    let ref_key = extract_object_path(&reference_image_path);
+    let mut download_futures = Vec::new();
+    download_futures.push(state.storage.download_file(ref_key));
+    for item in &items {
+        let item_key = extract_object_path(item.image_path.as_deref().unwrap());
+        download_futures.push(state.storage.download_file(item_key));
+    }
+
+    let downloaded_images = futures::future::try_join_all(download_futures)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to download images from storage: {e}")))?;
+
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+
+    let (ref_bytes, ref_ct) = &downloaded_images[0];
+    let ref_mime = content_type_for(ref_key, ref_ct);
+    let ref_b64 = BASE64.encode(ref_bytes);
+
+    let (ref_w, ref_h) = match image::load_from_memory(ref_bytes) {
+        Ok(img) => {
+            let oriented = crate::upload::apply_orientation(img.to_rgba8(), crate::upload::exif_orientation(ref_bytes));
+            oriented.dimensions()
+        }
+        Err(_) => (1024, 1024),
+    };
+    let chosen_aspect_ratio = crate::upload::best_supported_aspect_ratio(ref_w, ref_h);
+
+    let raw_bytes = if tryon_provider == "qwen_local" {
+        let qwen_prompt = build_qwen_prompt(&items);
+        let mut images_b64 = vec![ref_b64];
+        for (idx, _) in items.iter().enumerate() {
+            let (item_bytes, _) = &downloaded_images[idx + 1];
+            images_b64.push(BASE64.encode(item_bytes));
+        }
+
+        let qwen_width = std::env::var("QWEN_WIDTH")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(832);
+        let qwen_height = std::env::var("QWEN_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1248);
+
+        let qwen_request = serde_json::json!({
+            "prompt": qwen_prompt,
+            "images_base64": images_b64,
+            "width": qwen_width,
+            "height": qwen_height,
+            "seed": 42
+        });
+
+        let timeout_secs = std::env::var("QWEN_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let gen_endpoint = format!("{}/generate", local_qwen_url.trim_end_matches('/'));
+        let res = client
+            .post(&gen_endpoint)
+            .json(&qwen_request)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to reach local Qwen server at {gen_endpoint}: {e}")))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            return Err((StatusCode::BAD_GATEWAY, format!("Local Qwen server error ({status}): {err_text}")));
+        }
+
+        let res_json: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid response from local Qwen server: {e}")))?;
+
+        let b64 = res_json
+            .get("image_base64")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| (StatusCode::BAD_GATEWAY, "Local Qwen server response missing 'image_base64'".to_string()))?;
+
+        BASE64
+            .decode(b64)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to decode image from local Qwen server: {e}")))?
+    } else {
+        let api_key = gemini_api_key.expect("Gemini API key verified above");
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+
+        parts.push(serde_json::json!({
+            "text": format!(
+                "Task: Photorealistic virtual try-on.\n\
+                 You are dressing the real person shown in the Target User Reference Photo below.\n\n\
+                 [TARGET USER REFERENCE PHOTO]:"
+            )
+        }));
+
+        parts.push(serde_json::json!({
+            "inlineData": {
+                "mimeType": ref_mime,
+                "data": ref_b64
+            }
+        }));
+
+        parts.push(serde_json::json!({
+            "text": format!(
+                "CRITICAL SUBJECT PRESERVATION RULES:\n\
+                 - The person in the output image MUST BE the exact same person from the Target User Reference Photo above.\n\
+                 - Preserve their full head, face, facial hair, hairstyle, eyes, nose, mouth, skin tone, body proportions, posture, and mirror selfie pose.\n\
+                 - DO NOT CROP THE HEAD. The user's entire head, face, and hair MUST be clearly visible and recognizable.\n\
+                 - DO NOT replace this person with any generic model or headless mannequin.\n\
+                 - Preserve the same camera framing, aspect ratio ({chosen_aspect_ratio}), orientation, and background setting from the Target User Reference Photo.\n\n\
+                 Now, here are the new garments to dress this person in:\n"
+            )
+        }));
+
+        for (idx, item) in items.iter().enumerate() {
+            let (item_bytes, item_ct) = &downloaded_images[idx + 1];
+            let item_key = extract_object_path(item.image_path.as_deref().unwrap());
+            let item_mime = content_type_for(item_key, item_ct);
+            let item_b64 = BASE64.encode(item_bytes);
+
+            let cat = item.category_name.as_deref().unwrap_or("Uncategorized");
+            let subcat = item.subcategory_name.as_deref().unwrap_or("General");
+            let color = item.color_id.as_deref().unwrap_or("Unspecified");
+            let name = &item.name;
+
+            parts.push(serde_json::json!({
+                "text": format!(
+                    "[GARMENT {} - Category: {} / {}, Color: {}, Name: \"{}\"]:\n\
+                     Extract ONLY the {} from this photo and dress the Target User in it.\n\
+                     NOTE: This garment photo may show a catalog model, mannequin, or studio background. \
+                     You MUST COMPLETELY IGNORE any model, face, or background in this garment photo. \
+                     Under no circumstances should the output image be headless or on a white studio background.",
+                    idx + 1, cat, subcat, color, name, name
+                )
+            }));
+
+            parts.push(serde_json::json!({
+                "inlineData": {
+                    "mimeType": item_mime,
+                    "data": item_b64
+                }
+            }));
+        }
+
+        parts.push(serde_json::json!({
+            "text": format!(
+                "FINAL OUTPUT REQUIREMENTS:\n\
+                 - Output a single photorealistic image of the TARGET USER from the Reference Photo, head-to-toe with their FULL HEAD, FACE, and HAIR visible, wearing the specified new garments.\n\
+                 - Completely remove any previous conflicting clothing from the user in the Reference Photo.\n\
+                 - Ensure seamless realistic fabric drape, accurate garment colors, and lighting matching the original Reference Photo.\n\
+                 - Aspect ratio MUST be {chosen_aspect_ratio}.\n\
+                 - Output ONLY the final generated image."
+            )
+        }));
+
+        let request_body = serde_json::json!({
+            "contents": [{
+                "parts": parts
+            }],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {
+                    "aspectRatio": chosen_aspect_ratio
+                }
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let res = client
+            .post("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header("x-goog-api-key", &api_key)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to reach Gemini API: {e}")))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            let error_msg = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&err_text) {
+                if let Some(msg) = parsed.pointer("/error/message").and_then(|v| v.as_str()) {
+                    msg.to_string()
+                } else {
+                    err_text
+                }
+            } else {
+                err_text
+            };
+
+            let mapped_status = if status.is_client_error() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            return Err((mapped_status, format!("Gemini API error ({status}): {error_msg}")));
+        }
+
+        let res_json: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid response from Gemini API: {e}")))?;
+
+        let candidates = res_json.get("candidates").and_then(|c| c.as_array());
+        let parts = candidates
+            .and_then(|c| c.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array());
+
+        let base64_image = parts.and_then(|parts| {
+            parts.iter().find_map(|part| {
+                part.get("inlineData")
+                    .or_else(|| part.get("inline_data"))
+                    .and_then(|data_obj| data_obj.get("data"))
+                    .and_then(|data_val| data_val.as_str())
+            })
+        });
+
+        let base64_image = match base64_image {
+            Some(b64) => b64,
+            None => {
+                let finish_reason = candidates
+                    .and_then(|c| c.first())
+                    .and_then(|c| c.get("finishReason"))
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("UNKNOWN");
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("Gemini did not return an image. Finish reason: {finish_reason}"),
+                ));
+            }
+        };
+
+        BASE64
+            .decode(base64_image)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to decode image from Gemini: {e}")))?
+    };
+
+    let (processed_bytes, _) = crate::upload::process_and_encode_image_matching_aspect(
+        &raw_bytes,
+        ref_w,
+        ref_h,
+    )?;
+
+    let key = format!("users/{user_id}/{}-tryon.jpg", Uuid::new_v4());
+    state
+        .storage
+        .upload_file(&key, processed_bytes)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save generated image: {e}")))?;
+
+    Ok(Json(GeneratePreviewResponse {
+        image_path: key,
+    }))
+}
+
 const MAX_IMAGE_DIMENSION: u32 = 1600;
+
 const JPEG_QUALITY: u8 = 80;
 /// Upper bound for the `?width=` resize request to prevent memory DoS.
 const MAX_SERVE_WIDTH: u32 = 4096;
@@ -893,4 +1655,76 @@ mod tests {
         .is_err());
         assert!(validate_image_path(&serde_json::json!(42), &u).is_err());
     }
+
+    #[test]
+    fn test_user_settings_blocked_in_generic_crud() {
+        assert!(is_generic_crud_table_blocked("user-settings"));
+        assert!(!is_generic_crud_table_blocked("outfits"));
+        assert!(!is_generic_crud_table_blocked("clothing-items"));
+    }
+
+    #[test]
+    fn test_ssrf_blocks_metadata_ip() {
+        let err = validate_local_qwen_url("http://169.254.169.254/latest/meta-data");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("metadata"));
+
+        let err2 = validate_local_qwen_url("http://169.254.1.2:8000");
+        assert!(err2.is_err());
+    }
+
+    #[test]
+    fn test_ssrf_blocks_internal_ports() {
+        let err_axum = validate_local_qwen_url("http://127.0.0.1:3000");
+        assert!(err_axum.is_err());
+        assert!(err_axum.unwrap_err().contains("Port 3000 is reserved"));
+
+        let err_pg = validate_local_qwen_url("http://127.0.0.1:5432");
+        assert!(err_pg.is_err());
+        assert!(err_pg.unwrap_err().contains("Port 5432 is reserved"));
+    }
+
+    #[test]
+    fn test_ssrf_allows_local_qwen() {
+        let ok = validate_local_qwen_url("http://127.0.0.1:8001");
+        assert!(ok.is_ok());
+        let url = ok.unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.port(), Some(8001));
+
+        let ok_lh = validate_local_qwen_url("http://localhost:8001/generate");
+        assert!(ok_lh.is_ok());
+    }
+
+    #[test]
+    fn test_build_qwen_prompt() {
+        let items = vec![
+            GarmentItemRow {
+                id: Uuid::new_v4(),
+                name: "Classic Tee".to_string(),
+                color_id: Some("Navy".to_string()),
+                image_path: Some("users/x/1.jpg".to_string()),
+                notes: None,
+                category_name: Some("Tops".to_string()),
+                subcategory_name: Some("T-Shirts".to_string()),
+            },
+            GarmentItemRow {
+                id: Uuid::new_v4(),
+                name: "Slim Jeans".to_string(),
+                color_id: Some("Blue".to_string()),
+                image_path: Some("users/x/2.jpg".to_string()),
+                notes: None,
+                category_name: Some("Bottoms".to_string()),
+                subcategory_name: Some("Jeans".to_string()),
+            },
+        ];
+
+        let prompt = build_qwen_prompt(&items);
+        assert!(prompt.contains("Picture 1 unchanged"));
+        assert!(prompt.contains("Replace the clothes worn by the person in Picture 1 with the garments shown in the following pictures:"));
+        assert!(prompt.contains("- Picture 2: Tops (T-Shirts) in Navy, \"Classic Tee\""));
+        assert!(prompt.contains("- Picture 3: Bottoms (Jeans) in Blue, \"Slim Jeans\""));
+        assert!(prompt.contains("Remove any existing clothing in Picture 1 that conflicts with these garments."));
+    }
 }
+
