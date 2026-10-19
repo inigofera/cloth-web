@@ -3,3 +3,25 @@
 node_modules/
 cloth_export_*.json
 scripts/*.generated.sql
+
+# Editor and IDE
+.vscode/
+opencode.json
+
+# Scratch & diagnostic scripts
+dns_test/
+src/test_ipv4.rs
+src/http_db/
+
+# Python & inference worker binaries and weights
+__pycache__/
+*.pyc
+.venv/
+local_inference/models/
+local_inference/*.exe
+local_inference/*.dll
+local_inference/*.so
+local_inference/*.dylib
+local_inference/*.txt
+!local_inference/requirements.txt
+local_inference/local_inference/
