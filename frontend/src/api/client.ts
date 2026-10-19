@@ -7,14 +7,17 @@ import type {
   ColumnInfo,
   CreateClothingItemPayload,
   CreateOutfitPayload,
+  GeneratePreviewResponse,
   JsonValue,
-  Outfit
+  Outfit,
+  UpdateUserSettingsPayload,
+  UserSettings
 } from './types';
 import { supabase } from '../lib/supabase';
 import { isValidObjectPath } from '../lib/sanitize';
 
 const API_BASE = '/api';
-const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_BUCKET as string;
+const STORAGE_BUCKET = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'clothing-wardrobe';
 
 let accessToken: string | null = null;
 
@@ -30,6 +33,8 @@ export interface ImageUrlOptions {
 }
 
 function objectPathOf(path: string): string {
+  const usersIdx = path.indexOf('users/');
+  if (usersIdx !== -1) return path.slice(usersIdx);
   const publicMarker = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
   const authMarker = `/storage/v1/object/authenticated/${STORAGE_BUCKET}/`;
   const idx = path.indexOf(publicMarker);
@@ -126,5 +131,23 @@ export const api = {
   createSubcategory: (data: { name: string; category_id: number }) => fetchJson<ClothingSubcategory>(
     `${API_BASE}/clothing-subcategories`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
-  )
+  ),
+  getSettings: () => fetchJson<UserSettings>(`${API_BASE}/settings`),
+  updateSettings: (payload: UpdateUserSettingsPayload) => fetchJson<UserSettings>(
+    `${API_BASE}/settings`,
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+  ),
+  generateOutfitPreview: (itemIds: string[]) => fetchJson<GeneratePreviewResponse>(
+    `${API_BASE}/outfits/generate-preview`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item_ids: itemIds }) }
+  ),
+  testQwenConnection: (url?: string) => {
+    const params = new URLSearchParams();
+    if (url) params.set('url', url);
+    const qs = params.toString();
+    return fetchJson<{ status: string; model: string; ready: boolean; [key: string]: unknown }>(
+      `${API_BASE}/settings/test-qwen${qs ? `?${qs}` : ''}`
+    );
+  }
 };
+

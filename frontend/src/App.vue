@@ -43,6 +43,7 @@
             <OutfitsView v-else-if="activeTab === 'outfits'" />
             <InsightsView v-else-if="activeTab === 'insights'" />
             <TablesView v-else-if="activeTab === 'tables'" />
+            <SettingsView v-else-if="activeTab === 'settings'" />
           </KeepAlive>
         </main>
       </div>
@@ -57,6 +58,7 @@ import { useRouter, type TabId } from './lib/router';
 import ClothesView from './components/ClothesView.vue';
 import OutfitsView from './components/OutfitsView.vue';
 import TablesView from './components/TablesView.vue';
+import SettingsView from './components/SettingsView.vue';
 import LoginForm from './components/LoginForm.vue';
 import { MdAppBar, MdNavDrawer, MdButton, type DrawerItem } from './ui';
 
@@ -75,7 +77,9 @@ const navItems: DrawerItem[] = [
   { id: 'outfits', label: 'Outfits', icon: 'shirt' },
   { id: 'insights', label: 'Insights', icon: 'insights' },
   { id: 'tables', label: 'Tables', icon: 'table' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
+
 
 const activeTab = router.currentTab;
 const drawerOpen = ref(true);

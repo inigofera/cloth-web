@@ -1,8 +1,8 @@
 import { ref, computed } from 'vue';
 
-export type TabId = 'clothes' | 'outfits' | 'insights' | 'tables';
+export type TabId = 'clothes' | 'outfits' | 'insights' | 'tables' | 'settings';
 
-const VALID_TABS: TabId[] = ['clothes', 'outfits', 'insights', 'tables'];
+const VALID_TABS: TabId[] = ['clothes', 'outfits', 'insights', 'tables', 'settings'];
 
 export interface RouteState {
   tab: TabId;

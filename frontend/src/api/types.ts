@@ -120,6 +120,28 @@ export interface CreateOutfitPayload {
   date: string;
   notes: string | null;
   item_ids: UUID[];
+  image_path?: string | null;
+}
+
+export type TryOnProvider = 'gemini' | 'qwen_local';
+
+export interface UserSettings {
+  tryon_provider: TryOnProvider;
+  has_api_key: boolean;
+  api_key_hint: string | null;
+  local_qwen_url: string;
+  reference_image_path: string | null;
+}
+
+export interface UpdateUserSettingsPayload {
+  tryon_provider?: TryOnProvider;
+  api_key?: string;
+  local_qwen_url?: string;
+  reference_image_path?: string;
+}
+
+export interface GeneratePreviewResponse {
+  image_path: string;
 }
 
 

@@ -15,7 +15,37 @@ export interface ErrorContext {
 export function classifyError(err: unknown): ErrorContext {
   const msg = err instanceof Error ? err.message : String(err);
 
-  // Network errors (4xx/5xx, fetch failures)
+  // If the error represents an HTTP status response, preserve the server's actual error message
+  const httpMatch = msg.match(/^(\d{3})\s+([^:]+)(?::\s*([\s\S]*))?$/);
+  if (httpMatch) {
+    const statusCode = parseInt(httpMatch[1], 10);
+    const detail = httpMatch[3]?.trim();
+    const serverMsg = detail || msg;
+
+    if (statusCode === 401 || statusCode === 403 || /unauthorized|forbidden|session|token/i.test(serverMsg)) {
+      return {
+        message: 'Your session has expired. Please sign in again.',
+        type: 'auth',
+        suggestion: 'Click Sign out and then Sign in.'
+      };
+    }
+
+    if (statusCode >= 400 && statusCode < 500) {
+      return {
+        message: serverMsg,
+        type: 'validation',
+        suggestion: undefined
+      };
+    }
+
+    return {
+      message: serverMsg,
+      type: 'unknown',
+      suggestion: statusCode === 502 || statusCode === 504 ? 'Please verify your local inference service is running and responsive.' : undefined
+    };
+  }
+
+  // True browser client fetch failures (e.g. "Failed to fetch", "NetworkError", "net::ERR_CONNECTION_REFUSED")
   if (/fetch|network|timeout|abort/i.test(msg)) {
     return {
       message: 'Network error. Please check your connection and try again.',

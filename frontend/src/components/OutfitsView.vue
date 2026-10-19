@@ -60,7 +60,28 @@
 
           <div v-if="dayOutfits.length > 0" class="day-outfits">
             <div v-for="outfit in dayOutfits" :key="outfit.id" class="outfit-card">
+              <div v-if="outfit.image_path" class="outfit-image-wrapper">
+                <button
+                  type="button"
+                  class="outfit-image-button"
+                  title="Click to view full size"
+                  aria-label="Click to expand outfit photo"
+                  @click="openExpandedPreview(outfit.image_path, outfit.notes || 'Outfit Photo')"
+                >
+                  <img
+                    :src="imageUrl(outfit.image_path, { width: 720 })!"
+                    alt="Try-on outfit photo"
+                    class="outfit-card-img"
+                    loading="lazy"
+                  />
+                  <div class="expand-badge">
+                    <MdIcon name="fullscreen" :size="16" />
+                    <span>Expand</span>
+                  </div>
+                </button>
+              </div>
               <div class="outfit-items">
+
                 <span v-for="item in outfit.items" :key="item.id" class="item-tag">
                   {{ item.name }}
                 </span>
@@ -162,7 +183,81 @@
               </div>
             </div>
 
+            <!-- Try-On Preview Generation -->
+            <div class="tryon-section">
+              <div class="tryon-controls">
+                <MdButton
+                  variant="tonal"
+                  :disabled="selectedItems.length === 0 || isGeneratingPreview"
+                  @click="handleGeneratePreview"
+                >
+                  <template #icon>
+                    <MdIcon name="sparkles" :size="18" />
+                  </template>
+                  {{ isGeneratingPreview ? 'Generating outfit preview (10–20s)...' : 'Generate Try-On Preview' }}
+                </MdButton>
+              </div>
+
+              <div v-if="generationError" class="tryon-error-block">
+                <ErrorDisplay
+                  :message="generationErrorMessage"
+                  type="unknown"
+                  dismissible
+                  @dismiss="generationError = null"
+                />
+                <div v-if="isMissingSettings" class="missing-settings-cta">
+                  <MdButton variant="outlined" @click="router.navigate('settings')">
+                    Go to Settings
+                  </MdButton>
+                </div>
+              </div>
+
+              <div v-if="generatedImagePath" class="tryon-preview-box">
+                <div
+                  class="tryon-preview-wrapper"
+                  role="button"
+                  tabindex="0"
+                  title="Click to view full size"
+                  aria-label="Click to expand outfit preview"
+                  @click="openExpandedPreview(generatedImagePath, 'Generated Outfit Preview')"
+                  @keydown.enter.prevent="openExpandedPreview(generatedImagePath, 'Generated Outfit Preview')"
+                  @keydown.space.prevent="openExpandedPreview(generatedImagePath, 'Generated Outfit Preview')"
+                >
+                  <img
+                    :src="imageUrl(generatedImagePath, { width: 1200 })!"
+                    alt="Generated outfit preview"
+                    class="tryon-preview-thumb"
+                  />
+                  <div class="expand-badge">
+                    <MdIcon name="fullscreen" :size="16" />
+                    <span>Expand</span>
+                  </div>
+                </div>
+                <div class="tryon-preview-actions">
+                  <MdButton
+                    variant="outlined"
+                    @click="saveImageToDisk(generatedImagePath)"
+                  >
+                    <template #icon><MdIcon name="download" :size="16" /></template>
+                    Save Image
+                  </MdButton>
+                  <MdButton variant="text" @click="discardPreview">
+                    Discard
+                  </MdButton>
+                  <MdButton
+                    variant="tonal"
+                    :disabled="isGeneratingPreview"
+                    @click="handleGeneratePreview"
+                  >
+                    <template #icon><MdIcon name="sparkles" :size="16" /></template>
+                    Regenerate
+                  </MdButton>
+                </div>
+              </div>
+            </div>
+
             <div v-if="formError" class="error">{{ formError }}</div>
+
 
             <div class="form-actions">
               <button
@@ -181,18 +276,139 @@
       </aside>
     </div>
 
+    <!-- Lightbox Expanded Image Modal -->
+    <Teleport to="body">
+      <Transition name="lightbox-fade">
+        <div
+          v-if="expandedImagePath"
+          class="lightbox-overlay"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="expandedImageTitle"
+          tabindex="-1"
+          @click.self="closeExpandedPreview"
+        >
+          <div class="lightbox-dialog" role="document">
+            <header class="lightbox-header">
+              <span class="lightbox-title">{{ expandedImageTitle }}</span>
+              <div class="lightbox-header-actions">
+                <MdButton
+                  variant="tonal"
+                  @click="saveImageToDisk(expandedImagePath)"
+                >
+                  <template #icon><MdIcon name="download" :size="18" /></template>
+                  Save Image
+                </MdButton>
+                <MdIconButton
+                  icon="close"
+                  label="Close preview"
+                  variant="standard"
+                  @click="closeExpandedPreview"
+                />
+              </div>
+            </header>
+            <div class="lightbox-body" @click.self="closeExpandedPreview">
+              <img
+                :src="imageUrl(expandedImagePath, { width: 1600 })!"
+                :alt="expandedImageTitle"
+                class="lightbox-img"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
     <Toast v-model:show="showToast" :message="toastMessage" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
-import { ErrorDisplay, Toast } from '../ui';
+import { ErrorDisplay, Toast, MdButton, MdIconButton, MdIcon } from '../ui';
 import { classifyError } from '../lib/errors';
 import { formatLocalDateKey, parseOutfitDateKey, formatSelectedDateLabel } from '../lib/dates';
+import { useRouter } from '../lib/router';
 import type { ClothingCategory, ClothingItem, Outfit } from '../api/types';
+
+const router = useRouter();
+
+const isGeneratingPreview = ref(false);
+const generatedImagePath = ref<string | null>(null);
+const generationError = ref<unknown | null>(null);
+const expandedImagePath = ref<string | null>(null);
+const expandedImageTitle = ref<string>('Outfit Preview');
+
+function openExpandedPreview(path: string | null, title = 'Outfit Preview') {
+  if (!path) return;
+  expandedImagePath.value = path;
+  expandedImageTitle.value = title;
+}
+
+function closeExpandedPreview() {
+  expandedImagePath.value = null;
+}
+
+async function saveImageToDisk(path: string | null, customName?: string) {
+  if (!path) return;
+  const src = imageUrl(path, { width: 1600 }) || imageUrl(path);
+  if (!src) return;
+  try {
+    const resp = await fetch(src);
+    const blob = await resp.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    const datePart = selectedDate.value || new Date().toISOString().slice(0, 10);
+    link.download = customName || `outfit-${datePart}.jpg`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(objectUrl);
+    toastMessage.value = 'Image saved.';
+    showToast.value = true;
+  } catch (e) {
+    console.error('Failed to download image directly, falling back to window.open', e);
+    window.open(src, '_blank');
+  }
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && expandedImagePath.value) {
+    closeExpandedPreview();
+  }
+}
+
+const generationErrorMessage = computed(() => {
+  if (!generationError.value) return '';
+  return classifyError(generationError.value).message;
+});
+
+const isMissingSettings = computed(() => {
+  const msg = generationErrorMessage.value.toLowerCase();
+  return msg.includes('settings') || msg.includes('api key') || msg.includes('reference photo') || msg.includes('configured');
+});
+
+async function handleGeneratePreview() {
+  if (selectedItems.value.length === 0 || isGeneratingPreview.value) return;
+  isGeneratingPreview.value = true;
+  generationError.value = null;
+  try {
+    const res = await api.generateOutfitPreview(selectedItems.value);
+    generatedImagePath.value = res.image_path;
+  } catch (err) {
+    generationError.value = err;
+  } finally {
+    isGeneratingPreview.value = false;
+  }
+}
+
+function discardPreview() {
+  generatedImagePath.value = null;
+}
+
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -341,6 +557,8 @@ function goToday() {
 function selectDay(key: string) {
   selectedDate.value = key;
   formError.value = null;
+  generatedImagePath.value = null;
+  generationError.value = null;
 }
 
 function closeForm() {
@@ -348,9 +566,16 @@ function closeForm() {
   notes.value = '';
   selectedItems.value = [];
   formError.value = null;
+  generatedImagePath.value = null;
+  generationError.value = null;
+  isGeneratingPreview.value = false;
 }
 
 function firstItemImage(outfit: Outfit, width: number): string | null {
+  if (outfit.image_path) {
+    const url = imageUrl(outfit.image_path, { width });
+    if (url) return url;
+  }
   for (const item of outfit.items) {
     const url = imageUrl(item.image_path, { width });
     if (url) return url;
@@ -377,18 +602,22 @@ async function submitOutfit() {
     const created = await api.createOutfit({
       date: selectedDate.value,
       notes: sanitizeText(notes.value, { max: OUTFIT_NOTES_MAX }) || null,
-      item_ids: selectedItems.value
+      item_ids: selectedItems.value,
+      image_path: generatedImagePath.value || null
     });
     outfits.value.push(created);
     outfits.value.sort((a, b) => outfitKey(a).localeCompare(outfitKey(b)));
     notes.value = '';
     selectedItems.value = [];
+    generatedImagePath.value = null;
+    generationError.value = null;
   } catch (err) {
     formError.value = classifyError(err).message;
   } finally {
     saving.value = false;
   }
 }
+
 
 async function removeOutfit(outfit: Outfit) {
   actionError.value = null;
@@ -425,7 +654,14 @@ async function loadData() {
   }
 }
 
-onMounted(loadData);
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown);
+  loadData();
+});
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+});
 </script>
 
 <style scoped>
@@ -901,4 +1137,215 @@ onMounted(loadData);
     width: 100%;
   }
 }
+
+.outfit-image-wrapper {
+  margin-bottom: 0.75rem;
+  border-radius: var(--md-shape-medium, 8px);
+  overflow: hidden;
+  background: var(--md-surface-container-high, #e9ecef);
+}
+
+.outfit-image-button {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  min-height: 180px;
+  max-height: 360px;
+}
+
+.outfit-card-img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.outfit-image-button:hover .outfit-card-img {
+  transform: scale(1.02);
+}
+
+.outfit-image-button:hover .expand-badge {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.tryon-section {
+  margin: 1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tryon-controls {
+  display: flex;
+  align-items: center;
+}
+
+.tryon-error-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.missing-settings-cta {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.tryon-preview-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--md-outline-variant, #e0e0e0);
+  border-radius: var(--md-shape-medium, 8px);
+  background: var(--md-surface-container, #f8f9fa);
+}
+
+.tryon-preview-wrapper {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: var(--md-surface-container-high, #e9ecef);
+  border-radius: var(--md-shape-medium, 8px);
+  overflow: hidden;
+  cursor: pointer;
+  min-height: 240px;
+  max-height: 480px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.tryon-preview-thumb {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  display: block;
+  transition: transform 0.2s ease;
+}
+
+.tryon-preview-wrapper:hover .tryon-preview-thumb {
+  transform: scale(1.02);
+}
+
+.expand-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.85;
+  transition: opacity 0.2s ease, background 0.2s ease;
+  pointer-events: none;
+}
+
+.tryon-preview-wrapper:hover .expand-badge {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.tryon-preview-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Lightbox Modal */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.lightbox-dialog {
+  display: flex;
+  flex-direction: column;
+  max-width: 95vw;
+  max-height: 95vh;
+  background: var(--md-surface, #ffffff);
+  border-radius: var(--md-shape-large, 16px);
+  overflow: hidden;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.4);
+}
+
+.lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--md-surface, #ffffff);
+  border-bottom: 1px solid var(--md-outline-variant, #e0e0e0);
+}
+
+.lightbox-title {
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--md-on-surface, #212121);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lightbox-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.lightbox-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #121212;
+  padding: 0.75rem;
+}
+
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 80vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+  display: block;
+}
+
+.lightbox-fade-enter-active,
+.lightbox-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.lightbox-fade-enter-from,
+.lightbox-fade-leave-to {
+  opacity: 0;
+}
+
 </style>

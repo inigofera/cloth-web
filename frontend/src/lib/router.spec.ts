@@ -26,4 +26,12 @@ describe('useRouter', () => {
     expect(router.params.value.item).toBe('item-42');
     expect(window.location.hash).toContain('item=item-42');
   });
+
+  it('navigates to settings tab', () => {
+    const router = useRouter();
+    router.navigate('settings');
+    expect(router.currentTab.value).toBe('settings');
+    expect(window.location.hash).toBe('#settings');
+  });
 });
+
