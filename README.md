@@ -2,6 +2,8 @@
 
 A web app for managing clothing items and outfits, backed by Supabase (Postgres + Storage).
 
+> For an exhaustive, deep-dive specification of the codebase architecture, data models, backend endpoints, custom M3 design system, and analytics engine, see [REPO_DESCRIPTION.md](REPO_DESCRIPTION.md).
+
 ## Stack
 
 - **Backend** — Rust / Axum on port 3000 (`src/`): generic table CRUD, outfit management, file uploads. Auth via Supabase JWTs (HS256, `authenticated` role only).
