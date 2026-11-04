@@ -121,7 +121,6 @@ fn with_total_count(total: i64, rows: Vec<JsonValue>) -> (axum::http::HeaderMap,
     }
     (headers, Json(rows))
 }
-
 pub async fn get_table_rows(
     State(state): State<Arc<AppState>>,
     Path(table): Path<String>,
@@ -559,7 +558,7 @@ pub async fn create_outfit(
     sqlx::query(
         "UPDATE \"clothing-items\" ci \
          SET wear_count = COALESCE(ci.wear_count, 0) + 1, updated_at = now() \
-         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1) s \
+         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1::uuid) s \
          WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
     )
     .bind(&outfit_id)
@@ -600,7 +599,7 @@ pub async fn delete_outfit(
     sqlx::query(
         "UPDATE \"clothing-items\" ci \
          SET wear_count = GREATEST(COALESCE(ci.wear_count, 0) - 1, 0), updated_at = now() \
-         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1) s \
+         FROM (SELECT DISTINCT oi.clothing_item_id FROM \"outfit-items\" oi WHERE oi.outfit_id = $1::uuid) s \
          WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
     )
     .bind(outfit_uuid)
@@ -634,6 +633,16 @@ pub async fn delete_outfit(
     }
 }
 
+pub async fn sync_discord_outfits(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<crate::discord::SyncResult>, (StatusCode, String)> {
+    let result = crate::discord::sync_discord_for_user(&state.db, user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(result))
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct UserSettingsResponse {
     pub tryon_provider: String,
@@ -641,6 +650,13 @@ pub struct UserSettingsResponse {
     pub api_key_hint: Option<String>,
     pub local_qwen_url: String,
     pub reference_image_path: Option<String>,
+    pub discord_user_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DiscordLinkCodeResponse {
+    pub code: String,
+    pub expires_in_seconds: u32,
 }
 
 #[derive(Deserialize)]
@@ -725,8 +741,9 @@ pub async fn get_user_settings(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
-        r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url
+        r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url, discord_user_id
            FROM public."user-settings"
            WHERE user_id = $1"#,
     )
@@ -735,8 +752,8 @@ pub async fn get_user_settings(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to fetch settings: {e}")))?;
 
-    let (has_api_key, api_key_hint, reference_image_path, tryon_provider, local_qwen_url) = match row {
-        Some((Some(enc), Some(nonce), ref_path, provider, qwen_url)) if !enc.is_empty() && !nonce.is_empty() => {
+    let (has_api_key, api_key_hint, reference_image_path, tryon_provider, local_qwen_url, discord_user_id) = match row {
+        Some((Some(enc), Some(nonce), ref_path, provider, qwen_url, disc_id)) if !enc.is_empty() && !nonce.is_empty() => {
             let provider = provider.unwrap_or_else(|| "gemini".to_string());
             let qwen_url = qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
             match crate::crypto::decrypt_api_key(&enc, &nonce, &state.encryption_key) {
@@ -748,22 +765,23 @@ pub async fn get_user_settings(
                         format!("...{plain}")
                     };
                     drop(plain);
-                    (true, Some(hint), ref_path, provider, qwen_url)
+                    (true, Some(hint), ref_path, provider, qwen_url, disc_id)
                 }
                 Err(e) => {
                     eprintln!("Failed to decrypt API key for user {user_id}: {e}");
-                    (false, None, ref_path, provider, qwen_url)
+                    (false, None, ref_path, provider, qwen_url, disc_id)
                 }
             }
         }
-        Some((_, _, ref_path, provider, qwen_url)) => (
+        Some((_, _, ref_path, provider, qwen_url, disc_id)) => (
             false,
             None,
             ref_path,
             provider.unwrap_or_else(|| "gemini".to_string()),
             qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string()),
+            disc_id,
         ),
-        None => (false, None, None, "gemini".to_string(), "http://127.0.0.1:8001".to_string()),
+        None => (false, None, None, "gemini".to_string(), "http://127.0.0.1:8001".to_string(), None),
     };
 
     Ok(Json(UserSettingsResponse {
@@ -772,6 +790,7 @@ pub async fn get_user_settings(
         api_key_hint,
         local_qwen_url,
         reference_image_path,
+        discord_user_id,
     }))
 }
 
@@ -860,6 +879,51 @@ pub async fn update_user_settings(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update settings: {e}")))?;
+
+    get_user_settings(State(state), AuthUser(user_id)).await
+}
+
+pub async fn generate_discord_link_code(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<DiscordLinkCodeResponse>, (StatusCode, String)> {
+    use rand::Rng;
+    let code: u32 = rand::thread_rng().gen_range(100000..999999);
+    let code_str = code.to_string();
+
+    sqlx::query(
+        r#"INSERT INTO public."user-settings" (user_id, discord_link_code, discord_link_expires_at, updated_at)
+           VALUES ($1, $2, now() + interval '15 minutes', now())
+           ON CONFLICT (user_id) DO UPDATE SET
+               discord_link_code = EXCLUDED.discord_link_code,
+               discord_link_expires_at = EXCLUDED.discord_link_expires_at,
+               updated_at = now()"#,
+    )
+    .bind(user_id)
+    .bind(&code_str)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate code: {e}")))?;
+
+    Ok(Json(DiscordLinkCodeResponse {
+        code: code_str,
+        expires_in_seconds: 900,
+    }))
+}
+
+pub async fn unlink_discord_account(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<UserSettingsResponse>, (StatusCode, String)> {
+    sqlx::query(
+        r#"UPDATE public."user-settings"
+           SET discord_user_id = NULL, discord_link_code = NULL, discord_link_expires_at = NULL, updated_at = now()
+           WHERE user_id = $1"#,
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to unlink Discord: {e}")))?;
 
     get_user_settings(State(state), AuthUser(user_id)).await
 }

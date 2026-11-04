@@ -342,6 +342,62 @@ uvicorn server:app --host 127.0.0.1 --port 8001</code></pre>
           </div>
         </div>
       </section>
+
+      <!-- Section 3: Discord Daily Outfits Bot -->
+      <section class="settings-card">
+        <div class="card-header">
+          <div class="card-title-group">
+            <h2 class="card-title">Discord Daily Outfits Bot</h2>
+            <div
+              :class="['status-badge', settings?.discord_user_id ? 'status-badge--configured' : 'status-badge--missing']"
+            >
+              {{ settings?.discord_user_id ? 'Connected' : 'Not Connected' }}
+            </div>
+          </div>
+          <p class="card-description">
+            Connect your Discord account so you can log your daily outfits by sending messages directly to <strong>cloth-bot</strong>.
+          </p>
+        </div>
+
+        <!-- State A: Connected -->
+        <div v-if="settings?.discord_user_id" class="discord-connected">
+          <div class="discord-account-info">
+            <span class="discord-icon-badge">💬</span>
+            <div class="discord-account-details">
+              <span class="discord-account-name">Discord Account Linked</span>
+              <span class="discord-account-id">ID: <code>{{ settings.discord_user_id }}</code></span>
+            </div>
+          </div>
+          <MdButton variant="outlined" :disabled="unlinkingDiscord" @click="handleUnlinkDiscord">
+            {{ unlinkingDiscord ? 'Disconnecting...' : 'Disconnect Discord' }}
+          </MdButton>
+        </div>
+
+        <!-- State B: Not connected -->
+        <div v-else class="discord-unconnected">
+          <div v-if="!discordLinkCode" class="discord-action-box">
+            <p class="discord-instructions-text">
+              To pair your Discord account with your personal wardrobe, generate a secure 6-digit link code.
+            </p>
+            <MdButton variant="filled" :disabled="generatingDiscordCode" @click="handleGenerateDiscordCode">
+              {{ generatingDiscordCode ? 'Generating Code...' : 'Connect Discord Account' }}
+            </MdButton>
+          </div>
+
+          <div v-else class="discord-code-box">
+            <p class="code-instruction">
+              Send this command to <strong>@cloth-bot</strong> in your server channel or direct message:
+            </p>
+            <div class="code-pill">
+              <code>!link {{ discordLinkCode }}</code>
+              <button type="button" class="copy-code-btn" @click="copyDiscordCommand">
+                {{ discordCopied ? '✓ Copied' : 'Copy' }}
+              </button>
+            </div>
+            <p class="code-expiry">⏱️ Code expires in 15 minutes.</p>
+          </div>
+        </div>
+      </section>
     </div>
 
     <Toast v-model:show="showToast" :message="toastMessage" />
@@ -579,6 +635,51 @@ async function clearReferencePhoto() {
   } finally {
     uploadingPhoto.value = false;
   }
+}
+
+const generatingDiscordCode = ref(false);
+const discordLinkCode = ref<string | null>(null);
+const unlinkingDiscord = ref(false);
+const discordCopied = ref(false);
+
+async function handleGenerateDiscordCode() {
+  generatingDiscordCode.value = true;
+  actionError.value = null;
+  try {
+    const res = await api.generateDiscordLinkCode();
+    discordLinkCode.value = res.code;
+    notify('Link code generated! Send it to the bot on Discord.');
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    generatingDiscordCode.value = false;
+  }
+}
+
+async function handleUnlinkDiscord() {
+  if (!confirm('Are you sure you want to disconnect your Discord account?')) {
+    return;
+  }
+  unlinkingDiscord.value = true;
+  actionError.value = null;
+  try {
+    settings.value = await api.unlinkDiscordAccount();
+    discordLinkCode.value = null;
+    notify('Discord account disconnected.');
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    unlinkingDiscord.value = false;
+  }
+}
+
+function copyDiscordCommand() {
+  if (!discordLinkCode.value) return;
+  navigator.clipboard.writeText(`!link ${discordLinkCode.value}`);
+  discordCopied.value = true;
+  setTimeout(() => {
+    discordCopied.value = false;
+  }, 2000);
 }
 
 onMounted(loadSettings);
@@ -1049,6 +1150,98 @@ onMounted(loadSettings);
 
 .error-wrapper {
   margin-top: 1rem;
+}
+
+.discord-connected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  background: var(--md-surface-variant, #f5f5f5);
+  border-radius: var(--md-shape-medium, 8px);
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.discord-account-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.discord-icon-badge {
+  font-size: 1.5rem;
+}
+
+.discord-account-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.discord-account-name {
+  font-weight: 600;
+  color: var(--md-on-surface);
+}
+
+.discord-account-id {
+  font-size: 0.85rem;
+  color: var(--md-on-surface-variant);
+}
+
+.discord-instructions-text {
+  margin: 0 0 1rem;
+  color: var(--md-on-surface-variant);
+  line-height: 1.5;
+}
+
+.discord-code-box {
+  background: var(--md-surface-variant, #f5f5f5);
+  padding: 1.25rem;
+  border-radius: var(--md-shape-medium, 8px);
+}
+
+.code-instruction {
+  margin: 0 0 0.75rem;
+  color: var(--md-on-surface);
+}
+
+.code-pill {
+  display: inline-flex;
+  align-items: center;
+  background: #2b2d31;
+  color: #fff;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  gap: 0.75rem;
+  font-size: 1.1rem;
+}
+
+.code-pill code {
+  color: #5865f2;
+  font-weight: 700;
+  font-family: monospace;
+}
+
+.copy-code-btn {
+  background: #5865f2;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.copy-code-btn:hover {
+  background: #4752c4;
+}
+
+.code-expiry {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--md-on-surface-variant);
 }
 </style>
 

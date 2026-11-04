@@ -131,6 +131,7 @@ export interface UserSettings {
   api_key_hint: string | null;
   local_qwen_url: string;
   reference_image_path: string | null;
+  discord_user_id: string | null;
 }
 
 export interface UpdateUserSettingsPayload {

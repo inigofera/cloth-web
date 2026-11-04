@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import SettingsView from './SettingsView.vue';
 import { api } from '../api/client';
+import type { UserSettings } from '../api/types';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -14,19 +15,26 @@ vi.mock('../api/client', () => ({
   imageUrl: vi.fn((path: string | null) => (path ? `/api/files/${path}` : null)),
 }));
 
+/** Complete settings fixture so mock objects always satisfy `UserSettings`. */
+function settings(overrides: Partial<UserSettings> = {}): UserSettings {
+  return {
+    tryon_provider: 'gemini',
+    has_api_key: false,
+    api_key_hint: null,
+    local_qwen_url: 'http://127.0.0.1:8001',
+    reference_image_path: null,
+    discord_user_id: null,
+    ...overrides,
+  };
+}
+
 describe('SettingsView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('renders unconfigured state when user has no settings', async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({
-      tryon_provider: 'gemini',
-      has_api_key: false,
-      api_key_hint: null,
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
+    vi.mocked(api.getSettings).mockResolvedValue(settings());
 
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -37,13 +45,9 @@ describe('SettingsView', () => {
   });
 
   it('renders configured status with hint when settings exist', async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({
-      tryon_provider: 'gemini',
-      has_api_key: true,
-      api_key_hint: '...a1b2',
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: 'users/123/uuid-ref.jpg',
-    });
+    vi.mocked(api.getSettings).mockResolvedValue(
+      settings({ has_api_key: true, api_key_hint: '...a1b2', reference_image_path: 'users/123/uuid-ref.jpg' })
+    );
 
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -54,20 +58,8 @@ describe('SettingsView', () => {
   });
 
   it('saves an API key when entered', async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({
-      tryon_provider: 'gemini',
-      has_api_key: false,
-      api_key_hint: null,
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
-    vi.mocked(api.updateSettings).mockResolvedValue({
-      tryon_provider: 'gemini',
-      has_api_key: true,
-      api_key_hint: '...1234',
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
+    vi.mocked(api.getSettings).mockResolvedValue(settings());
+    vi.mocked(api.updateSettings).mockResolvedValue(settings({ has_api_key: true, api_key_hint: '...1234' }));
 
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -85,20 +77,10 @@ describe('SettingsView', () => {
   });
 
   it('switches provider to qwen_local and shows local server configuration', async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({
-      tryon_provider: 'gemini',
-      has_api_key: true,
-      api_key_hint: '...a1b2',
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
-    vi.mocked(api.updateSettings).mockResolvedValue({
-      tryon_provider: 'qwen_local',
-      has_api_key: true,
-      api_key_hint: '...a1b2',
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
+    vi.mocked(api.getSettings).mockResolvedValue(settings({ has_api_key: true, api_key_hint: '...a1b2' }));
+    vi.mocked(api.updateSettings).mockResolvedValue(
+      settings({ tryon_provider: 'qwen_local', has_api_key: true, api_key_hint: '...a1b2' })
+    );
 
     const wrapper = mount(SettingsView);
     await flushPromises();
@@ -114,13 +96,7 @@ describe('SettingsView', () => {
   });
 
   it('tests local Qwen connection when button is clicked', async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({
-      tryon_provider: 'qwen_local',
-      has_api_key: false,
-      api_key_hint: null,
-      local_qwen_url: 'http://127.0.0.1:8001',
-      reference_image_path: null,
-    });
+    vi.mocked(api.getSettings).mockResolvedValue(settings({ tryon_provider: 'qwen_local' }));
     vi.mocked(api.testQwenConnection).mockResolvedValue({
       status: 'ok',
       model: 'qwen-image-2.1-turbo-Q6_K_XL.gguf',
@@ -139,4 +115,3 @@ describe('SettingsView', () => {
     expect(wrapper.text()).toContain('Connected to Qwen/Qwen-Image-2.1-Turbo');
   });
 });
-

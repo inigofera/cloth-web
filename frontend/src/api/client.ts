@@ -118,6 +118,7 @@ async function listOutfitsWithTotal(): Promise<{ items: Outfit[]; total: number 
 export const api = {
   listClothingItemsWithTotal: () => listTableWithTotal<ClothingItem>('clothing-items'),
   listOutfitsWithTotal,
+
   listTables: () => fetchJson<ColumnInfo[]>(`${API_BASE}/tables`),
   getTableRows: (table: string) => fetchJson<JsonValue[]>(`${API_BASE}/db/${encodeURIComponent(table)}`),
   insertTableRow: (table: string, data: JsonValue) => fetchJson<JsonValue | null>(
@@ -182,6 +183,20 @@ export const api = {
       // flow offers a cancel action while it runs for 10-20s).
       signal,
     }
+  ),
+  syncDiscordOutfits: () => fetchJson<{
+    imported_count: number;
+    messages_processed: number;
+    new_items_created: number;
+    summary: string[];
+  }>(`${API_BASE}/outfits/discord-sync`, { method: 'POST' }),
+  generateDiscordLinkCode: () => fetchJson<{ code: string; expires_in_seconds: number }>(
+    `${API_BASE}/settings/discord-code`,
+    { method: 'POST' }
+  ),
+  unlinkDiscordAccount: () => fetchJson<UserSettings>(
+    `${API_BASE}/settings/discord-unlink`,
+    { method: 'POST' }
   ),
   testQwenConnection: (url?: string) => {
     const params = new URLSearchParams();

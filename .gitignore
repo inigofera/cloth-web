@@ -3,6 +3,8 @@
 node_modules/
 cloth_export_*.json
 scripts/*.generated.sql
+*outfits*.txt
+evenmoreoutfits.txt
 
 # Editor and IDE
 .vscode/

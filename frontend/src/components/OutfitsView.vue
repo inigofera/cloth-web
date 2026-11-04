@@ -39,7 +39,14 @@
           <MdButton variant="filled" @click="logToday()">
             Log today's outfit
           </MdButton>
-
+          <button
+            class="today-btn sync-btn"
+            :disabled="isSyncingDiscord"
+            title="Check and import new outfits from Discord"
+            @click="syncDiscord(true)"
+          >
+            {{ isSyncingDiscord ? 'Syncing...' : 'Sync Discord' }}
+          </button>
         </div>
 
         <div class="calendar-grid" role="grid" aria-label="Outfit calendar">
@@ -957,11 +964,39 @@ function loadData() {
   void wardrobe.refresh();
 }
 
+const isSyncingDiscord = ref(false);
 
+async function syncDiscord(manual = false) {
+  if (isSyncingDiscord.value) return;
+  isSyncingDiscord.value = true;
+  try {
+    const res = await api.syncDiscordOutfits();
+    if (res.imported_count > 0) {
+      let msg = `Imported ${res.imported_count} outfit${res.imported_count > 1 ? 's' : ''}`;
+      if (res.new_items_created > 0) {
+        msg += ` (${res.new_items_created} new item${res.new_items_created > 1 ? 's' : ''} added)`;
+      }
+      msg += ' successfully from Discord.';
+      toastMessage.value = msg;
+      showToast.value = true;
+      await wardrobe.refresh();
+    } else if (manual) {
+      toastMessage.value = 'Discord is up to date (no new outfits found).';
+      showToast.value = true;
+    }
+  } catch (err) {
+    if (manual) {
+      actionError.value = classifyError(err).message;
+    }
+  } finally {
+    isSyncingDiscord.value = false;
+  }
+}
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown);
   void wardrobe.load();
+  void syncDiscord(false);
 });
 
 onActivated(() => {
@@ -1007,7 +1042,8 @@ onUnmounted(() => {
   flex: 1;
 }
 
-.nav-btn {
+.nav-btn,
+.sync-btn {
   margin-left: 0.35rem;
 }
 
