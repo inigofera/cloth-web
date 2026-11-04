@@ -8,6 +8,7 @@
       :data="data"
       :class="{ 'widget-card--drag-over': overIndex === i && dragIndex !== null && dragIndex !== i }"
       @remove="$emit('remove', w.id)"
+      @move="dir => $emit('move', w.id, dir)"
       @resize="s => $emit('resize', w.id, s)"
       @update-config="patch => $emit('update-config', w.id, patch)"
       @drag-start="onDragStart(i)"
@@ -40,6 +41,7 @@ defineProps<{
 const emit = defineEmits<{
   reorder: [from: number, to: number];
   remove: [id: string];
+  move: [id: string, direction: -1 | 1];
   resize: [id: string, size: WidgetSize];
   'update-config': [id: string, patch: Record<string, unknown>];
   'add-request': [];

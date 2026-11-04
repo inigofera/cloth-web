@@ -33,6 +33,14 @@
           <MdIcon name="more-vert" :size="18" />
         </button>
         <div v-if="menuOpen" class="widget-card__menu-panel">
+          <!-- Keyboard parity for drag-and-drop reordering: the menu gives every
+               user (mouse, keyboard, or screen reader) a way to move widgets. -->
+          <button type="button" @click="$emit('move', -1)">
+            Move up
+          </button>
+          <button type="button" @click="$emit('move', 1)">
+            Move down
+          </button>
           <button type="button" @click="configOpen = !configOpen; menuOpen = false">
             {{ configOpen ? 'Hide settings' : 'Configure' }}
           </button>
@@ -150,6 +158,7 @@ const emit = defineEmits<{
   remove: [];
   resize: [size: WidgetSize];
   'update-config': [patch: Record<string, unknown>];
+  'move': [direction: -1 | 1];
   'drag-start': [];
   'drag-end': [];
   'drag-over': [];
