@@ -22,11 +22,14 @@ vi.mock('../../api/client', () => {
   const b = { id: 'i2', name: 'Dark Jeans', category_id: 2, subcategory_id: null, color_id: null, brand_id: null, purchase_price: null, owned_since: null, laundry_impact: null, is_active: true, wear_count: null, image_path: null, created_at: '2024-06-01T00:00:00Z', updated_at: '2024-06-01T00:00:00Z' };
   return {
     api: {
-      listClothingItems: vi.fn().mockResolvedValue([a, b]),
-      listOutfits: vi.fn().mockResolvedValue([
-        { id: 'o-recent', date: daysAgoIso(2), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(2), items: [{ id: 'i1', name: 'Blue Shirt', image_path: null, color_id: 'blue' }] },
-        { id: 'o-old', date: daysAgoIso(200), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(200), items: [{ id: 'i2', name: 'Dark Jeans', image_path: null, color_id: null }] },
-      ]),
+      listClothingItemsWithTotal: vi.fn().mockResolvedValue({ items: [a, b], total: null }),
+      listOutfitsWithTotal: vi.fn().mockResolvedValue({
+        items: [
+          { id: 'o-recent', date: daysAgoIso(2), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(2), items: [{ id: 'i1', name: 'Blue Shirt', image_path: null, color_id: 'blue' }] },
+          { id: 'o-old', date: daysAgoIso(200), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(200), items: [{ id: 'i2', name: 'Dark Jeans', image_path: null, color_id: null }] },
+        ],
+        total: null,
+      }),
       listColors: vi.fn().mockResolvedValue([{ id: 'blue', hex_value: '#0000ff' }]),
       listCategories: vi.fn().mockResolvedValue([{ id: 1, name: 'Tops' }, { id: 2, name: 'Bottoms' }]),
       listSubcategories: vi.fn().mockResolvedValue([]),

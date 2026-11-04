@@ -174,6 +174,8 @@
           @dismiss="actionError = null"
         />
 
+        <div v-if="truncationNotice" class="cap-notice">{{ truncationNotice }}</div>
+
         <h2 class="section-title">
           My clothes <span class="count">({{ items.length }})</span>
         </h2>
@@ -183,6 +185,7 @@
             v-model="clothesSearch"
             type="search"
             class="clothes-search-input"
+            aria-label="Search clothes"
             placeholder="Search clothes by name, brand, or notes…"
           />
           <div v-if="categories.length > 0" class="category-pills">
@@ -323,9 +326,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue';
+import { ref, reactive, computed, onActivated, onMounted, watch } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { useRouter } from '../lib/router';
+import { formatTruncationNotice, useWardrobe, WARDROBE_STALE_MS } from '../lib/wardrobe';
 import {
   sanitizeText,
   sanitizeOption,
@@ -355,8 +359,17 @@ import {
   type LaundryImpact
 } from '../api/types';
 
-const loading = ref(true);
-const loadError = ref<string | null>(null);
+const wardrobe = useWardrobe();
+const {
+  items,
+  colors,
+  categories,
+  subcategories,
+  brands,
+  loading,
+  error: loadError
+} = wardrobe;
+
 const actionError = ref<string | null>(null);
 const actionErrorType = ref<ErrorContext['type']>('unknown');
 const showToast = ref(false);
@@ -368,7 +381,6 @@ function setActionError(err: unknown) {
   actionError.value = c.message;
   actionErrorType.value = c.type;
 }
-const items = ref<ClothingItem[]>([]);
 const selectedItemId = ref<string | null>(null);
 
 const selectedItem = computed(
@@ -396,10 +408,16 @@ const filteredClothesItems = computed(() => {
   });
 });
 
-const colors = ref<Color[]>([]);
-const categories = ref<ClothingCategory[]>([]);
-const subcategories = ref<ClothingSubcategory[]>([]);
-const brands = ref<Brand[]>([]);
+// Data-completeness notice (UX_ANALYSIS.md P1-B3): rendered only when the
+// server reports that more rows exist than were loaded.
+const truncationNotice = computed(() =>
+  formatTruncationNotice(
+    items.value.length,
+    wardrobe.itemTotal.value,
+    wardrobe.outfits.value.length,
+    wardrobe.outfitTotal.value
+  ),
+);
 
 const form = reactive<ClothingItemFormState>({
   name: '',
@@ -460,19 +478,19 @@ function brandName(id: string | null): string | null {
 }
 
 function pushColor(color: Color) {
-  if (!colors.value.some(c => c.id === color.id)) colors.value.push(color);
+  wardrobe.addColor(color);
 }
 
 function pushCategory(category: ClothingCategory) {
-  if (!categories.value.some(c => c.id === category.id)) categories.value.push(category);
+  wardrobe.addCategory(category);
 }
 
 function pushSubcategory(subcategory: ClothingSubcategory) {
-  if (!subcategories.value.some(s => s.id === subcategory.id)) subcategories.value.push(subcategory);
+  wardrobe.addSubcategory(subcategory);
 }
 
 function pushBrand(brand: Brand) {
-  if (!brands.value.some(b => b.id === brand.id)) brands.value.push(brand);
+  wardrobe.addBrand(brand);
 }
 
 function resetForm() {
@@ -531,7 +549,7 @@ async function submitItem() {
       image_path: imagePath
     });
 
-    items.value.unshift(created);
+    wardrobe.addItem(created);
     resetForm();
   } catch (err) {
     formError.value = classifyError(err).message;
@@ -616,7 +634,7 @@ async function saveEdit() {
     })) as ClothingItem | null;
 
     if (updated) {
-      Object.assign(item, updated);
+      wardrobe.replaceItem(updated);
     }
     editMode.value = false;
   } catch (err) {
@@ -643,7 +661,7 @@ async function removeItemAndBack() {
   actionError.value = null;
   try {
     await api.deleteTableRow('clothing-items', item.id);
-    items.value = items.value.filter(i => i.id !== item.id);
+    wardrobe.removeItem(item.id);
     closeDetail();
     confirmingDelete.value = false;
     toastMessage.value = `Deleted "${item.name}".`;
@@ -663,7 +681,7 @@ async function deactivateSelected() {
   actionError.value = null;
   try {
     await api.updateTableRow('clothing-items', item.id, { is_active: false });
-    item.is_active = false;
+    wardrobe.patchItem(item.id, { is_active: false });
     confirmingDelete.value = false;
     undoManager.registerUndo({
       type: 'deactivate',
@@ -671,7 +689,7 @@ async function deactivateSelected() {
       name: item.name,
       undo: async () => {
         await api.updateTableRow('clothing-items', item.id, { is_active: true });
-        item.is_active = true;
+        wardrobe.patchItem(item.id, { is_active: true });
       }
     });
     pendingUndoAction.value = undoManager.getPending();
@@ -690,31 +708,19 @@ async function handleUndo() {
   pendingUndoAction.value = null;
 }
 
-async function loadData() {
-  try {
-    loading.value = true;
-    loadError.value = null;
-    const [itemData, colorData, categoryData, subcategoryData, brandData] =
-      await Promise.all([
-        api.listClothingItems(),
-        api.listColors(),
-        api.listCategories(),
-        api.listSubcategories(),
-        api.listBrands()
-      ]);
-    items.value = Array.isArray(itemData) ? itemData : [];
-    colors.value = Array.isArray(colorData) ? colorData : [];
-    categories.value = Array.isArray(categoryData) ? categoryData : [];
-    subcategories.value = Array.isArray(subcategoryData) ? subcategoryData : [];
-    brands.value = Array.isArray(brandData) ? brandData : [];
-  } catch (err) {
-    loadError.value = classifyError(err).message;
-  } finally {
-    loading.value = false;
-  }
+function loadData() {
+  void wardrobe.refresh();
 }
 
-onMounted(loadData);
+onMounted(() => {
+  void wardrobe.load();
+});
+
+onActivated(() => {
+  // The shared store already has every local mutation. This only picks up
+  // changes made elsewhere (another tab/device) when the view is reopened.
+  void wardrobe.load({ maxAgeMs: WARDROBE_STALE_MS });
+});
 </script>
 
 <style scoped>
@@ -1122,4 +1128,13 @@ onMounted(loadData);
     width: 100%;
   }
 }
+.cap-notice {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.9rem;
+  font-size: var(--md-body-small-size, 0.8rem);
+  color: var(--md-on-secondary-container, #444);
+  background: var(--md-secondary-container, #eee);
+  border-radius: var(--md-shape-small, 6px);
+}
+
 </style>

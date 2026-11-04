@@ -16,7 +16,7 @@ vi.mock('vue-chartjs', async () => {
 
 vi.mock('../../api/client', () => ({
   api: {
-    listClothingItems: vi.fn().mockResolvedValue([
+    listClothingItemsWithTotal: vi.fn().mockResolvedValue({ items: [
       {
         id: 'i1',
         name: 'Blue Shirt',
@@ -49,8 +49,8 @@ vi.mock('../../api/client', () => ({
         created_at: '2024-06-01T00:00:00Z',
         updated_at: '2024-06-01T00:00:00Z',
       },
-    ]),
-    listOutfits: vi.fn().mockResolvedValue([
+    ], total: null }),
+    listOutfitsWithTotal: vi.fn().mockResolvedValue({ items: [
       {
         id: 'o1',
         date: new Date(Date.now() - 86400000).toISOString(),
@@ -64,7 +64,7 @@ vi.mock('../../api/client', () => ({
           { id: 'i2', name: 'Dark Jeans', category_id: 2, subcategory_id: 20, image_path: null, color_id: null },
         ],
       },
-    ]),
+    ], total: null }),
     listColors: vi.fn().mockResolvedValue([{ id: 'blue', hex_value: '#0000ff' }]),
     listCategories: vi.fn().mockResolvedValue([
       { id: 1, name: 'Tops' },

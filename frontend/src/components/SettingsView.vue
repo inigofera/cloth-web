@@ -96,6 +96,7 @@
                 v-model="apiKeyInput"
                 type="password"
                 class="text-input"
+                aria-label="Gemini API key"
                 placeholder="Paste your Gemini API key (AIzaSy...)"
                 :disabled="savingKey"
               />
@@ -176,6 +177,7 @@
                 v-model="qwenUrlInput"
                 type="url"
                 class="text-input"
+                aria-label="Local Qwen server URL"
                 placeholder="http://127.0.0.1:8001"
                 :disabled="savingQwenUrl || testingConnection"
               />

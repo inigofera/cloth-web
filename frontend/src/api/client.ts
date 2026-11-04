@@ -57,7 +57,10 @@ export function imageUrl(path: string | null | undefined, opts?: ImageUrlOptions
   return `${API_BASE}/files/${objectPath}${qs ? `?${qs}` : ''}`;
 }
 
-async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+async function fetchWithHeaders(
+  input: RequestInfo,
+  init?: RequestInit
+): Promise<{ data: unknown; headers: Headers }> {
   let { data } = await supabase.auth.getSession();
   const headers = new Headers(init?.headers);
   if (data.session) {
@@ -79,10 +82,42 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
   }
-  return res.json() as Promise<T>;
+  return { data: (await res.json()) as unknown, headers: res.headers };
+}
+
+async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+  const { data } = await fetchWithHeaders(input, init);
+  return data as T;
+}
+
+/**
+ * Read the `X-Total-Count` header set by list endpoints (UX_ANALYSIS.md P1-B1):
+ * it tells the UI how much data actually exists so a capped snapshot can be
+ * surfaced honestly instead of silently hidden.
+ */
+function readTotalCount(headers: Headers | null | undefined): number | null {
+  if (!headers) return null;
+  const raw = headers.get('X-Total-Count');
+  if (raw == null) return null; // older server / endpoint without the signal
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+async function listTableWithTotal<T>(table: string): Promise<{ items: T[]; total: number | null }> {
+  const { data, headers } = await fetchWithHeaders(
+    `${API_BASE}/db/${encodeURIComponent(table)}`
+  );
+  return { items: data as T[], total: readTotalCount(headers) };
+}
+
+async function listOutfitsWithTotal(): Promise<{ items: Outfit[]; total: number | null }> {
+  const { data, headers } = await fetchWithHeaders(`${API_BASE}/outfits`);
+  return { items: data as Outfit[], total: readTotalCount(headers) };
 }
 
 export const api = {
+  listClothingItemsWithTotal: () => listTableWithTotal<ClothingItem>('clothing-items'),
+  listOutfitsWithTotal,
   listTables: () => fetchJson<ColumnInfo[]>(`${API_BASE}/tables`),
   getTableRows: (table: string) => fetchJson<JsonValue[]>(`${API_BASE}/db/${encodeURIComponent(table)}`),
   insertTableRow: (table: string, data: JsonValue) => fetchJson<JsonValue | null>(
@@ -137,9 +172,16 @@ export const api = {
     `${API_BASE}/settings`,
     { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
   ),
-  generateOutfitPreview: (itemIds: string[]) => fetchJson<GeneratePreviewResponse>(
+  generateOutfitPreview: (itemIds: string[], signal?: AbortSignal) => fetchJson<GeneratePreviewResponse>(
     `${API_BASE}/outfits/generate-preview`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item_ids: itemIds }) }
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_ids: itemIds }),
+      // Optional so callers may cancel an in-flight generation (the try-on
+      // flow offers a cancel action while it runs for 10-20s).
+      signal,
+    }
   ),
   testQwenConnection: (url?: string) => {
     const params = new URLSearchParams();

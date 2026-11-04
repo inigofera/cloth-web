@@ -6,47 +6,88 @@
     </div>
 
     <div v-else class="layout">
+      <div v-if="showOnboarding" class="onboard-card">
+        <h3 class="onboard-title">Welcome to Cloth Web</h3>
+        <p class="onboard-copy">
+          Your insights are powered by logged outfits. Three quick steps to get started:
+        </p>
+        <ol class="onboard-steps">
+          <li>
+            <button type="button" class="link-btn" @click="router.navigate('clothes')">
+              Add your clothes in the Clothes tab
+            </button>
+          </li>
+          <li>Log an outfit for a day using the calendar and form on this screen.</li>
+          <li>
+            <button type="button" class="link-btn" @click="router.navigate('insights')">
+              Explore Insights to see what your wardrobe tells you
+            </button>
+          </li>
+        </ol>
+        <div class="onboard-actions">
+          <MdIconButton icon="close" label="Dismiss welcome guide" variant="standard" @click="dismissOnboarding()" />
+        </div>
+      </div>
+
+      <div v-if="truncationNotice" class="cap-notice">{{ truncationNotice }}</div>
+
       <section class="calendar-section">
         <div class="calendar-header">
           <button class="nav-btn" @click="prevMonth" aria-label="Previous month">‹</button>
           <h2 class="month-label">{{ monthLabel }}</h2>
           <button class="nav-btn" @click="nextMonth" aria-label="Next month">›</button>
-          <button class="today-btn" @click="goToday">Today</button>
+          <MdButton variant="filled" @click="logToday()">
+            Log today's outfit
+          </MdButton>
+
         </div>
 
-        <div class="calendar-grid">
-          <div v-for="day in WEEKDAYS" :key="day" class="weekday">{{ day }}</div>
-          <div
-            v-for="cell in cells"
-            :key="cell.key"
-            class="day-cell"
-            :class="{
-              other: cell.otherMonth,
-              today: cell.isToday,
-              selected: cell.key === selectedDate
-            }"
-            @click="selectDay(cell.key)"
-          >
-            <span class="day-number">{{ cell.day }}</span>
-            <div class="outfit-chips">
-              <div
-                v-for="outfit in cell.outfits.slice(0, 3)"
-                :key="outfit.id"
-                class="outfit-chip"
-                :title="chipTitle(outfit)"
-              >
-                <img v-if="firstItemImage(outfit, 28)" :src="firstItemImage(outfit, 28)!" class="chip-thumb" />
-                <span class="chip-label">{{ chipLabel(outfit) }}</span>
-              </div>
-              <div v-if="cell.outfits.length > 3" class="more-chip">
-                +{{ cell.outfits.length - 3 }} more
-              </div>
-            </div>
+        <div class="calendar-grid" role="grid" aria-label="Outfit calendar">
+          <div role="row" class="weekday-row">
+            <span v-for="day in WEEKDAYS" :key="day" role="columnheader" class="weekday">{{ day }}</span>
           </div>
+          <template v-for="(week, wi) in weeks" :key="'week-' + wi">
+            <div role="row" class="calendar-week">
+              <button
+                v-for="cell in week"
+                :key="cell.key"
+                type="button"
+                role="gridcell"
+                :ref="(el: unknown) => setDayCellRef(cell, el)"
+                class="day-cell"
+                :class="{
+                  other: cell.otherMonth,
+                  today: cell.isToday,
+                  selected: cell.key === selectedDate
+                }"
+                :tabindex="cell.key === focusedKey ? 0 : -1"
+                :aria-selected="cell.key === selectedDate"
+                :aria-label="cellLabel(cell)"
+                @click="selectDay(cell.key)"
+                @keydown="onCalendarKeydown($event, cell)"
+              >
+                <span class="day-number">{{ cell.day }}</span>
+                <div class="outfit-chips">
+                  <div
+                    v-for="outfit in cell.outfits.slice(0, 3)"
+                    :key="outfit.id"
+                    class="outfit-chip"
+                    :title="chipTitle(outfit)"
+                  >
+                    <img v-if="firstItemImage(outfit, 28)" :src="firstItemImage(outfit, 28)!" class="chip-thumb" alt="" />
+                    <span class="chip-label">{{ chipLabel(outfit) }}</span>
+                  </div>
+                  <div v-if="cell.outfits.length > 3" class="more-chip">
+                    +{{ cell.outfits.length - 3 }} more
+                  </div>
+                </div>
+              </button>
+            </div>
+          </template>
         </div>
       </section>
 
-      <aside class="day-panel">
+      <aside class="day-panel" ref="dayPanelRef" tabindex="-1">
         <ErrorDisplay
           v-if="actionError"
           :message="actionError"
@@ -153,6 +194,7 @@
                   v-model="pickerSearch"
                   type="search"
                   class="picker-search-input"
+                  aria-label="Search clothing items"
                   placeholder="Search items…"
                 />
                 <select v-if="categories.length > 0" v-model="pickerCategory" class="picker-cat-select">
@@ -175,10 +217,16 @@
                   />
                   <img v-if="imageUrl(item.image_path, { width: 56 })" :src="imageUrl(item.image_path, { width: 56 })" class="thumb" loading="lazy" />
                   <span class="item-name">{{ item.name }}</span>
+                  <span v-if="lastWornLabel(item.id)" class="picker-last-worn">last worn {{ lastWornLabel(item.id) }}</span>
                   <span v-if="!item.is_active" class="picker-inactive-tag">Inactive</span>
                 </label>
                 <div v-if="filteredPickerItems.length === 0" class="picker-empty">
-                  {{ items.length === 0 ? 'No clothing items yet' : 'No items match your search' }}
+                  <template v-if="items.length === 0">
+                    No clothing items yet — add some in the
+                    <button type="button" class="link-btn" @click="router.navigate('clothes')">Clothes</button>
+                    tab.
+                  </template>
+                  <template v-else>No items match your search</template>
                 </div>
               </div>
             </div>
@@ -196,6 +244,18 @@
                   </template>
                   {{ isGeneratingPreview ? 'Generating outfit preview (10–20s)...' : 'Generate Try-On Preview' }}
                 </MdButton>
+                <MdButton
+                  v-if="isGeneratingPreview"
+                  variant="text"
+                  @click="cancelGeneration()"
+                >
+                  Cancel
+                </MdButton>
+              </div>
+
+              <div v-if="isGeneratingPreview" class="tryon-progress" role="status">
+                <span class="tryon-progress__bar"><span class="tryon-progress__fill"></span></span>
+                <span class="tryon-progress__label">Elapsed {{ genSeconds }}s — usually 10–20s</span>
               </div>
 
               <div v-if="generationError" class="tryon-error-block">
@@ -286,6 +346,7 @@
           aria-modal="true"
           :aria-label="expandedImageTitle"
           tabindex="-1"
+          ref="lightboxRef"
           @click.self="closeExpandedPreview"
         >
           <div class="lightbox-dialog" role="document">
@@ -324,14 +385,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { nextTick, ref, computed, onActivated, onMounted, onUnmounted, watch } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { sanitizeText, OUTFIT_NOTES_MAX } from '../lib/sanitize';
 import { ErrorDisplay, Toast, MdButton, MdIconButton, MdIcon } from '../ui';
 import { classifyError } from '../lib/errors';
 import { formatLocalDateKey, parseOutfitDateKey, formatSelectedDateLabel } from '../lib/dates';
 import { useRouter } from '../lib/router';
-import type { ClothingCategory, ClothingItem, Outfit } from '../api/types';
+import { formatTruncationNotice, useWardrobe, WARDROBE_STALE_MS } from '../lib/wardrobe';
+import { buildLastWornMap, sortByRecency, formatLastWorn } from '../lib/picker';
+import type { Outfit } from '../api/types';
 
 const router = useRouter();
 
@@ -341,15 +404,33 @@ const generationError = ref<unknown | null>(null);
 const expandedImagePath = ref<string | null>(null);
 const expandedImageTitle = ref<string>('Outfit Preview');
 
+// Dialog focus management: remember where focus came from, move focus into the
+// dialog when it opens, and hand focus back to the trigger on close.
+const lightboxRef = ref<HTMLElement | null>(null);
+let previewTriggerEl: HTMLElement | null = null;
+
 function openExpandedPreview(path: string | null, title = 'Outfit Preview') {
   if (!path) return;
+  previewTriggerEl = (document.activeElement as HTMLElement | null) ?? null;
   expandedImagePath.value = path;
   expandedImageTitle.value = title;
 }
 
-function closeExpandedPreview() {
+async function closeExpandedPreview() {
+  const trigger = previewTriggerEl;
+  previewTriggerEl = null;
   expandedImagePath.value = null;
+  await nextTick();
+  if (trigger && document.contains(trigger)) {
+    trigger.focus();
+  }
 }
+
+watch(expandedImagePath, async (value) => {
+  if (!value) return;
+  await nextTick();
+  lightboxRef.value?.focus();
+});
 
 async function saveImageToDisk(path: string | null, customName?: string) {
   if (!path) return;
@@ -391,18 +472,50 @@ const isMissingSettings = computed(() => {
   return msg.includes('settings') || msg.includes('api key') || msg.includes('reference photo') || msg.includes('configured');
 });
 
+// A long-running generation must be legible: show elapsed time, give the user
+// a cancel path, and never leave them staring at an unresponsive button.
+const genSeconds = ref(0);
+let genTimer: number | null = null;
+let previewAbort: AbortController | null = null;
+
+function stopGenTimer(): void {
+  if (genTimer !== null) {
+    window.clearInterval(genTimer);
+    genTimer = null;
+  }
+}
+
 async function handleGeneratePreview() {
   if (selectedItems.value.length === 0 || isGeneratingPreview.value) return;
   isGeneratingPreview.value = true;
   generationError.value = null;
+  generatedImagePath.value = null;
+  previewAbort.value?.abort(); // defensive: never two overlapping generations
+  const controller = new AbortController();
+  previewAbort.value = controller;
+  genSeconds.value = 0;
+  stopGenTimer();
+  genTimer = window.setInterval(() => {
+    genSeconds.value += 1;
+  }, 1000);
   try {
-    const res = await api.generateOutfitPreview(selectedItems.value);
+    const res = await api.generateOutfitPreview(selectedItems.value, controller.signal);
     generatedImagePath.value = res.image_path;
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      // User cancelled the generation — that is not an error state.
+      return;
+    }
     generationError.value = err;
   } finally {
+    stopGenTimer();
     isGeneratingPreview.value = false;
+    previewAbort.value = null;
   }
+}
+
+function cancelGeneration(): void {
+  previewAbort.value?.abort();
 }
 
 function discardPreview() {
@@ -420,12 +533,38 @@ interface CalendarCell {
   outfits: Outfit[];
 }
 
-const loading = ref(true);
-const loadError = ref<string | null>(null);
+const wardrobe = useWardrobe();
+const {
+  outfits,
+  items,
+  categories,
+  loaded,
+  loading,
+  error: loadError
+} = wardrobe;
+
 const actionError = ref<string | null>(null);
-const outfits = ref<Outfit[]>([]);
-const items = ref<ClothingItem[]>([]);
-const categories = ref<ClothingCategory[]>([]);
+
+// First-run guidance: only shown while the wardrobe is genuinely empty, and it
+// can be dismissed permanently (per browser) via localStorage.
+const ONBOARDING_STORAGE_KEY = 'cw.onboarding.v1.dismissed';
+function initialOnboardingDismissed(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === '1';
+  } catch {
+    return true; // storage unavailable: never nag
+  }
+}
+const onboardingDismissed = ref(initialOnboardingDismissed());
+
+function dismissOnboarding(): void {
+  onboardingDismissed.value = true;
+  try {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, '1');
+  } catch {
+    // Non-fatal: the dismissal simply will not persist.
+  }
+}
 
 const pickerSearch = ref('');
 const pickerCategory = ref<number | null>(null);
@@ -438,11 +577,22 @@ function removeItemFromSelection(id: string) {
   selectedItems.value = selectedItems.value.filter(itemId => itemId !== id);
 }
 
+// Items the user most recently logged first: logging is a daily habit, so the
+// picker should surface familiar garments before the long tail. Items never
+// logged sink to the bottom (stable name order as tiebreak).
+const lastWorn = computed(() => buildLastWornMap(outfits.value));
+
+function lastWornLabel(id: string): string | null {
+  const key = lastWorn.value.get(id);
+  if (!key) return null;
+  return formatLastWorn(key, todayDateKey);
+}
+
 const filteredPickerItems = computed(() => {
   const q = pickerSearch.value.trim().toLowerCase();
   const cat = pickerCategory.value;
 
-  return items.value.filter(item => {
+  const matches = items.value.filter(item => {
     if (cat !== null && item.category_id !== cat) {
       return false;
     }
@@ -454,6 +604,8 @@ const filteredPickerItems = computed(() => {
     }
     return true;
   });
+
+  return sortByRecency(matches, lastWorn.value);
 });
 
 const confirmingDeleteId = ref<string | null>(null);
@@ -464,12 +616,27 @@ const toastMessage = ref('');
 const now = new Date();
 const viewYear = ref(now.getFullYear());
 const viewMonth = ref(now.getMonth());
+const todayDateKey = dateKey(now);
 
-const selectedDate = ref<string | null>(null);
+// The core action of this app is logging the outfit worn *today*. Defaulting
+// to that date keeps the landing screen immediately actionable; any explicit
+// selection made by the user always takes precedence.
+const selectedDate = ref<string | null>(todayDateKey);
+const focusedKey = ref<string>(todayDateKey);
 const notes = ref('');
 const selectedItems = ref<string[]>([]);
 const saving = ref(false);
 const formError = ref<string | null>(null);
+
+// A draft selection may survive in this kept-alive view after the item is
+// deleted in the Clothes tab. Drop ids that no longer exist so the form cannot
+// try to link a deleted item.
+watch(items, currentItems => {
+  const validIds = new Set(currentItems.map(item => item.id));
+  if (selectedItems.value.some(id => !validIds.has(id))) {
+    selectedItems.value = selectedItems.value.filter(id => validIds.has(id));
+  }
+});
 
 function dateKey(d: Date): string {
   return formatLocalDateKey(d);
@@ -520,6 +687,15 @@ const monthLabel = computed(() => {
     .toLocaleString(undefined, { month: 'long', year: 'numeric' });
 });
 
+// The 42 calendar cells grouped into the six visible weeks (ARIA grid rows).
+const weeks = computed<CalendarCell[][]>(() => {
+  const result: CalendarCell[][] = [];
+  for (let i = 0; i < cells.value.length; i += 7) {
+    result.push(cells.value.slice(i, i + 7));
+  }
+  return result;
+});
+
 const dayOutfits = computed<Outfit[]>(() => {
   if (!selectedDate.value) return [];
   return outfitsByDate.value.get(selectedDate.value) ?? [];
@@ -528,6 +704,21 @@ const dayOutfits = computed<Outfit[]>(() => {
 const selectedDateLabel = computed(() => {
   return formatSelectedDateLabel(selectedDate.value);
 });
+
+const showOnboarding = computed(
+  () => loaded.value && items.value.length === 0 && outfits.value.length === 0 && !onboardingDismissed.value,
+);
+
+// Data-completeness notice (UX_ANALYSIS.md P1-B3): rendered only when the
+// server reports that more rows exist than were loaded.
+const truncationNotice = computed(() =>
+  formatTruncationNotice(
+    items.value.length,
+    wardrobe.itemTotal.value,
+    outfits.value.length,
+    wardrobe.outfitTotal.value
+  ),
+);
 
 function prevMonth() {
   if (viewMonth.value === 0) {
@@ -547,18 +738,146 @@ function nextMonth() {
   }
 }
 
-function goToday() {
+const dayPanelRef = ref<HTMLElement | null>(null);
+
+/**
+ * On the stacked (narrow) layout the day panel sits below the calendar and is
+ * off-screen; selecting a day must have an observable consequence, so scroll
+ * the panel into view. With `focus`, also move focus there for keyboard and
+ * screen-reader users.
+ */
+function revealDayPanel(focus = false): void {
+  const panel = dayPanelRef.value;
+  if (!panel) return;
+  if (window.innerWidth <= 900) {
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  if (focus) {
+    panel.focus();
+  }
+}
+
+function logToday(): void {
   const today = new Date();
   viewYear.value = today.getFullYear();
   viewMonth.value = today.getMonth();
   selectedDate.value = dateKey(today);
+  focusedKey.value = selectedDate.value;
+  formError.value = null;
+  generationError.value = null;
+  revealDayPanel(true);
+}
+
+function cellLabel(cell: CalendarCell): string {
+  const parts: string[] = [formatSelectedDateLabel(cell.key)];
+  if (cell.outfits.length > 0) {
+    parts.push(`${cell.outfits.length} ${cell.outfits.length === 1 ? 'outfit' : 'outfits'} logged`);
+  }
+  if (cell.isToday) parts.push('today');
+  return parts.join(', ');
+}
+
+const dayCellEls = new Map<string, HTMLElement>();
+
+function setDayCellRef(cell: CalendarCell, el: unknown): void {
+  const node = el as HTMLElement | null;
+  if (node) {
+    dayCellEls.set(cell.key, node);
+  } else {
+    dayCellEls.delete(cell.key);
+  }
+}
+
+function keyToDate(key: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!m) return new Date();
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+function addMonthsClamped(d: Date, delta: number): Date {
+  const monthIndex = d.getMonth() + delta;
+  // Day 0 of month `monthIndex + 1` is the last day of `monthIndex`.
+  const daysInMonth = new Date(d.getFullYear(), monthIndex + 1, 0).getDate();
+  return new Date(d.getFullYear(), monthIndex, Math.min(d.getDate(), daysInMonth));
+}
+
+/** Navigate the visible grid so `date` falls inside it (PageUp/PageDown). */
+function navigateTo(date: Date): void {
+  viewYear.value = date.getFullYear();
+  viewMonth.value = date.getMonth();
+}
+
+function focusCell(key: string): void {
+  focusedKey.value = key;
+  dayCellEls.get(key)?.focus();
+}
+
+/**
+ * Keyboard navigation for the calendar grid (single tab stop, roving tabindex):
+ * arrows move by day/week, Home/End jump within the week, PageUp/PageDown
+ * switch months. Selection and focus advance together because selecting a day
+ * is the only action this grid performs.
+ */
+function onCalendarKeydown(e: KeyboardEvent, cell: CalendarCell): void {
+  const all = cells.value;
+  const idx = all.findIndex(c => c.key === cell.key);
+  if (idx === -1) return;
+
+  let targetIdx: number | null = null;
+  switch (e.key) {
+    case 'ArrowLeft':
+      targetIdx = Math.max(idx - 1, 0);
+      break;
+    case 'ArrowRight':
+      targetIdx = Math.min(idx + 1, all.length - 1);
+      break;
+    case 'ArrowUp':
+      targetIdx = Math.max(idx - 7, 0);
+      break;
+    case 'ArrowDown':
+      targetIdx = Math.min(idx + 7, all.length - 1);
+      break;
+    case 'Home': {
+      const offset = idx % 7;
+      targetIdx = idx - offset;
+      break;
+    }
+    case 'End': {
+      const offset = idx % 7;
+      targetIdx = Math.min(idx + (6 - offset), all.length - 1);
+      break;
+    }
+    case 'PageUp':
+    case 'PageDown': {
+      const delta = e.key === 'PageUp' ? -1 : 1;
+      const target = addMonthsClamped(keyToDate(cell.key), delta);
+      navigateTo(target);
+      // The grid re-renders with the new month; focus after Vue updates.
+      void nextTick().then(() => {
+        selectDay(formatLocalDateKey(target));
+        dayCellEls.get(formatLocalDateKey(target))?.focus();
+      });
+      e.preventDefault();
+      return;
+    }
+    default:
+      return;
+  }
+
+  e.preventDefault();
+  const target = all[targetIdx];
+  if (!target) return;
+  selectDay(target.key);
+  focusCell(target.key);
 }
 
 function selectDay(key: string) {
   selectedDate.value = key;
+  focusedKey.value = key;
   formError.value = null;
   generatedImagePath.value = null;
   generationError.value = null;
+  revealDayPanel();
 }
 
 function closeForm() {
@@ -605,8 +924,7 @@ async function submitOutfit() {
       item_ids: selectedItems.value,
       image_path: generatedImagePath.value || null
     });
-    outfits.value.push(created);
-    outfits.value.sort((a, b) => outfitKey(a).localeCompare(outfitKey(b)));
+    wardrobe.addOutfit(created);
     notes.value = '';
     selectedItems.value = [];
     generatedImagePath.value = null;
@@ -624,7 +942,7 @@ async function removeOutfit(outfit: Outfit) {
   deletingId.value = outfit.id;
   try {
     await api.deleteOutfit(outfit.id);
-    outfits.value = outfits.value.filter(o => o.id !== outfit.id);
+    wardrobe.removeOutfit(outfit);
     confirmingDeleteId.value = null;
     toastMessage.value = 'Outfit deleted.';
     showToast.value = true;
@@ -635,32 +953,27 @@ async function removeOutfit(outfit: Outfit) {
   }
 }
 
-async function loadData() {
-  try {
-    loading.value = true;
-    loadError.value = null;
-    const [outfitData, itemData, categoryData] = await Promise.all([
-      api.listOutfits(),
-      api.getTableRows('clothing-items'),
-      api.listCategories()
-    ]);
-    outfits.value = outfitData;
-    items.value = Array.isArray(itemData) ? (itemData as ClothingItem[]) : [];
-    categories.value = Array.isArray(categoryData) ? categoryData : [];
-  } catch (err) {
-    loadError.value = classifyError(err).message;
-  } finally {
-    loading.value = false;
-  }
+function loadData() {
+  void wardrobe.refresh();
 }
+
+
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown);
-  loadData();
+  void wardrobe.load();
+});
+
+onActivated(() => {
+  // Local mutations already update the shared store; this catches changes made
+  // in another tab/device after the snapshot has gone stale.
+  void wardrobe.load({ maxAgeMs: WARDROBE_STALE_MS });
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
+  stopGenTimer();
+  previewAbort.value?.abort();
 });
 </script>
 
@@ -694,7 +1007,10 @@ onUnmounted(() => {
   flex: 1;
 }
 
-.nav-btn,
+.nav-btn {
+  margin-left: 0.35rem;
+}
+
 .today-btn {
   padding: 0.35rem 0.75rem;
   border: 1px solid #ccc;
@@ -710,6 +1026,13 @@ onUnmounted(() => {
 }
 
 .calendar-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.weekday-row,
+.calendar-week {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 4px;
@@ -724,6 +1047,9 @@ onUnmounted(() => {
 }
 
 .day-cell {
+  appearance: none;
+  -webkit-appearance: none;
+  text-align: left;
   min-height: 84px;
   border: 1px solid #e0e0e0;
   border-radius: 6px;
@@ -1346,6 +1672,119 @@ onUnmounted(() => {
 .lightbox-fade-enter-from,
 .lightbox-fade-leave-to {
   opacity: 0;
+}
+
+/* First-run onboarding card */
+.onboard-card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: var(--md-surface-container-lowest, #fff);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.onboard-title {
+  font-size: 1.1rem;
+}
+
+.onboard-copy {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.onboard-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: #444;
+}
+
+.onboard-actions {
+  align-self: flex-end;
+}
+
+/* Inline text button (cross-links inside sentences) */
+.link-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--md-primary, #6750a4);
+  text-decoration: underline;
+}
+
+/* Picker recency hint */
+.picker-last-worn {
+  font-size: 0.68rem;
+  color: #999;
+  white-space: nowrap;
+}
+
+/* Try-on generation progress (indeterminate) */
+.tryon-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.tryon-progress__bar {
+  position: relative;
+  flex: 1;
+  max-width: 260px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #e3f2fd;
+  overflow: hidden;
+}
+
+.tryon-progress__fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  border-radius: inherit;
+  background: #007bff;
+  animation: tryon-progress-slide 1.2s ease-in-out infinite;
+}
+
+.tryon-progress__label {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+@keyframes tryon-progress-slide {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tryon-progress__fill {
+    animation: none;
+    left: 0;
+    width: 100%;
+  }
+}
+
+.cap-notice {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.9rem;
+  font-size: var(--md-body-small-size, 0.8rem);
+  color: var(--md-on-secondary-container, #444);
+  background: var(--md-secondary-container, #eee);
+  border-radius: var(--md-shape-small, 6px);
 }
 
 </style>

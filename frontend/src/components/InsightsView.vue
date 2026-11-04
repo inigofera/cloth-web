@@ -27,9 +27,16 @@
         @update="filters = $event"
       />
 
-      <div v-if="itemsCapped" class="cap-notice">
-        Showing the first 100 clothing items — the API is capped at 100 rows per table.
-      </div>
+      <!--
+        Data-completeness notice (UX_ANALYSIS.md P1-A1 / P1-B3): driven by the
+        server-reported X-Total-Count, so it only appears when a snapshot is
+        genuinely incomplete and always states real numbers.
+      -->
+      <div v-if="truncationNotice" class="cap-notice">{{ truncationNotice }}</div>
+
+      <!-- Polite live region: announces layout changes (widget moves) to
+           screen readers and other assistive technology. -->
+      <div aria-live="polite" role="status" class="sr-only">{{ layoutAnnouncement }}</div>
 
       <WidgetGrid
         v-if="widgets.length > 0"
@@ -37,6 +44,7 @@
         :data="filteredData"
         @reorder="reorderWidgets"
         @remove="removeWidget"
+        @move="(id: string, dir: -1 | 1) => moveWidget(id, dir)"
         @resize="resizeWidget"
         @update-config="updateWidgetConfig"
         @add-request="paletteOpen = true"
@@ -49,9 +57,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { api } from '../api/client';
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue';
 import { MdButton } from '../ui';
+import { formatTruncationNotice, useWardrobe, WARDROBE_STALE_MS } from '../lib/wardrobe';
 import FilterBar from './insights/FilterBar.vue';
 import WidgetGrid from './insights/WidgetGrid.vue';
 import WidgetPalette from './insights/WidgetPalette.vue';
@@ -78,9 +86,23 @@ import type {
   Outfit,
 } from '../api/types';
 
-const loading = ref(true);
-const loadError = ref<string | null>(null);
-const dataset = ref<InsightDataset | null>(null);
+const wardrobe = useWardrobe();
+const { loading, error: loadError } = wardrobe;
+
+// Rebuild the denormalized dataset whenever the shared wardrobe changes. This
+// keeps Insights in sync with items/outfits added or deleted in other tabs.
+const dataset = computed<InsightDataset | null>(() => {
+  if (!wardrobe.loaded.value) return null;
+  return buildDataset(
+    wardrobe.items.value,
+    wardrobe.outfits.value,
+    wardrobe.colors.value,
+    wardrobe.categories.value,
+    wardrobe.subcategories.value,
+    wardrobe.brands.value,
+  );
+});
+
 const filters = ref<GlobalFilters>({ ...DEFAULT_FILTERS });
 const paletteOpen = ref(false);
 const widgets = ref<WidgetInstance[]>(loadLayout(WIDGET_CATALOG));
@@ -91,7 +113,16 @@ const filteredData = computed<FilteredData>(() =>
   dataset.value ? applyFilters(dataset.value, filters.value) : { items: [], outfits: [] },
 );
 
-const itemsCapped = computed(() => (dataset.value?.items.length ?? 0) >= 100);
+// Derived from the server-reported totals (X-Total-Count). Replaces the old
+// hard-coded "capped at 100" banner, which stated a number the API never had.
+const truncationNotice = computed(() =>
+  formatTruncationNotice(
+    wardrobe.items.value.length,
+    wardrobe.itemTotal.value,
+    wardrobe.outfits.value.length,
+    wardrobe.outfitTotal.value
+  ),
+);
 
 const filterOptions = computed(() => {
   const ds = dataset.value;
@@ -127,11 +158,39 @@ function updateWidgetConfig(id: string, patch: Record<string, unknown>) {
   if (w) w.config = { ...w.config, ...patch };
 }
 
+// Screen-reader feedback for layout changes. Clearing the message first
+// guarantees that repeating the same announcement is read again.
+const layoutAnnouncement = ref('');
+
+function announceLayout(msg: string): void {
+  layoutAnnouncement.value = '';
+  void nextTick().then(() => {
+    layoutAnnouncement.value = msg;
+  });
+}
+
+function widgetTitle(type: string, fallback: string): string {
+  return WIDGET_CATALOG.get(type)?.title ?? fallback;
+}
+
+function moveWidget(id: string, direction: -1 | 1): void {
+  const idx = widgets.value.findIndex(w => w.id === id);
+  if (idx === -1) return;
+  const target = idx + direction;
+  if (target < 0 || target >= widgets.value.length) return; // already at the edge
+  reorderWidgets(idx, target);
+}
+
 function reorderWidgets(from: number, to: number) {
   const arr = [...widgets.value];
   const [moved] = arr.splice(from, 1);
   arr.splice(to, 0, moved);
   widgets.value = arr;
+  if (moved) {
+    announceLayout(
+      `${widgetTitle(moved.type, 'Widget')} moved from position ${from + 1} to position ${to + 1} of ${arr.length}.`,
+    );
+  }
 }
 
 const confirmingReset = ref(false);
@@ -198,31 +257,12 @@ function buildDataset(
   return { items, outfits, colors: colorMap, categories: catMap, subcategories: subMap, brands: brandMap };
 }
 
-onMounted(async () => {
-  try {
-    loading.value = true;
-    const [itemData, outfitData, colorData, categoryData, subcategoryData, brandData] =
-      await Promise.all([
-        api.listClothingItems(),
-        api.listOutfits(),
-        api.listColors(),
-        api.listCategories(),
-        api.listSubcategories(),
-        api.listBrands(),
-      ]);
-    dataset.value = buildDataset(
-      Array.isArray(itemData) ? itemData : [],
-      Array.isArray(outfitData) ? outfitData : [],
-      Array.isArray(colorData) ? colorData : [],
-      Array.isArray(categoryData) ? categoryData : [],
-      Array.isArray(subcategoryData) ? subcategoryData : [],
-      Array.isArray(brandData) ? brandData : [],
-    );
-  } catch (err) {
-    loadError.value = String(err);
-  } finally {
-    loading.value = false;
-  }
+onMounted(() => {
+  void wardrobe.load();
+});
+
+onActivated(() => {
+  void wardrobe.load({ maxAgeMs: WARDROBE_STALE_MS });
 });
 </script>
 
@@ -280,5 +320,17 @@ onMounted(async () => {
   font-style: italic;
   padding: 2rem 0;
   text-align: center;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 </style>
