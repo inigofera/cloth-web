@@ -107,11 +107,27 @@ fn db_write_error(error: SqlxError) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, "database write failed".into())
 }
 
+/// Hard cap for a single table read. Deliberately far beyond any realistic personal
+/// wardrobe; truncation is surfaced to clients through `X-Total-Count` instead of
+/// silently dropping rows (see UX_ANALYSIS.md, problem 1 / P1-B1).
+const TABLE_ROWS_MAX_LIMIT: i64 = 10_000;
+
+fn with_total_count(total: i64, rows: Vec<JsonValue>) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
+    let mut headers = axum::http::HeaderMap::new();
+    // An integer always parses as a valid header value; the if-let keeps this
+    // panic-free without adding a dependency.
+    if let Ok(value) = total.to_string().parse::<axum::http::header::HeaderValue>() {
+        headers.insert("X-Total-Count", value);
+    }
+    (headers, Json(rows))
+}
+
 pub async fn get_table_rows(
     State(state): State<Arc<AppState>>,
     Path(table): Path<String>,
     AuthUser(user_id): AuthUser,
-) -> Result<Json<Vec<JsonValue>>, (StatusCode, String)> {
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<(axum::http::HeaderMap, Json<Vec<JsonValue>>), (StatusCode, String)> {
     if is_generic_crud_table_blocked(&table) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -120,24 +136,50 @@ pub async fn get_table_rows(
     }
 
     if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Ok(Json(vec![]));
+        return Ok(with_total_count(0, vec![]));
     }
 
     let quoted_table = quote_ident(&table);
     let has_user_id = table_has_user_id(&state.db, &table).await.unwrap_or(false);
 
+    // Clients may request up to TABLE_ROWS_MAX_LIMIT rows. The default is the cap
+    // itself: a personal wardrobe will not come close to it, and anything beyond
+    // is made visible through X-Total-Count rather than hidden.
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|l| *l >= 1)
+        .map(|l| l.min(TABLE_ROWS_MAX_LIMIT))
+        .unwrap_or(TABLE_ROWS_MAX_LIMIT);
+
+    // Report the total row count so the UI can detect when a capped snapshot is
+    // incomplete and tell the user exactly how much data was loaded.
+    let total: i64 = if has_user_id {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM public.\"{}\" WHERE user_id = $1",
+            quoted_table
+        ))
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    } else {
+        let query = format!("SELECT COUNT(*) FROM public.{}", quoted_table);
+        sqlx::query_scalar(&query).fetch_one(&state.db).await.unwrap()
+    };
+
     let rows = if has_user_id {
         let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t WHERE t.user_id = $1 ORDER BY 1 LIMIT 500",
+            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t WHERE t.user_id = $1 ORDER BY 1 LIMIT $2",
             quoted_table
         );
-        sqlx::query(&query).bind(user_id).fetch_all(&state.db).await.unwrap()
+        sqlx::query(&query).bind(user_id).bind(limit).fetch_all(&state.db).await.unwrap()
     } else {
         let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t ORDER BY 1 LIMIT 500",
+            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t ORDER BY 1 LIMIT $1",
             quoted_table
         );
-        sqlx::query(&query).fetch_all(&state.db).await.unwrap()
+        sqlx::query(&query).bind(limit).fetch_all(&state.db).await.unwrap()
     };
 
     let result: Vec<JsonValue> = rows
@@ -145,7 +187,7 @@ pub async fn get_table_rows(
         .map(|r| r.get::<JsonValue, _>("row"))
         .collect();
 
-    Ok(Json(result))
+    Ok(with_total_count(total, result))
 }
 
 pub async fn insert_table_row(
@@ -448,7 +490,7 @@ const OUTFITS_WITH_ITEMS_SQL: &str =
 pub async fn list_outfits(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
-) -> Json<Vec<JsonValue>> {
+) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
     let sql = format!("{OUTFITS_WITH_ITEMS_SQL} ORDER BY o.date");
     let rows = sqlx::query(&sql)
         .bind(user_id)
@@ -456,7 +498,17 @@ pub async fn list_outfits(
         .await
         .unwrap();
 
-    Json(rows.into_iter().map(|r| r.get::<JsonValue, _>("row")).collect())
+    // Same completeness signal as /db/:table (X-Total-Count, UX_ANALYSIS.md P1-B1).
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outfits WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+    with_total_count(
+        total,
+        rows.into_iter().map(|r| r.get::<JsonValue, _>("row")).collect(),
+    )
 }
 
 pub async fn create_outfit(
