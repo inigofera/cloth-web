@@ -1,34 +1,69 @@
 <template>
   <div class="fselect" ref="root">
+    <!--
+      Combobox trigger (APG "combobox with listbox popup" pattern for
+      single-select; plain disclosure button for multi-select checkbox groups).
+    -->
     <button
       type="button"
       class="fselect__btn"
       :class="{ 'fselect__btn--active': active }"
-      @click="open = !open"
+      ref="btnRef"
+      :aria-haspopup="multi ? 'true' : 'listbox'"
+      :aria-expanded="open"
+      @click="toggleOpen($event)"
+      @keydown="onBtnKeydown"
     >
       <span class="fselect__label">{{ label }}</span>
       <span v-if="badgeText != null" class="fselect__badge">{{ badgeText }}</span>
       <MdIcon name="arrow_drop_down" :size="16" />
     </button>
 
-    <div v-if="open" class="fselect__panel">
-      <label v-for="opt in options" :key="opt.value" class="fselect__option" @click="selectOption(opt.value)">
-        <input
-          v-if="multi"
-          type="checkbox"
-          :checked="selected.includes(opt.value)"
-          @change="toggle(opt.value)"
-        />
-        <span v-else class="fselect__radio" :class="{ 'fselect__radio--on': selected.includes(opt.value) }"></span>
-        <span v-if="opt.swatch" class="fselect__swatch" :style="{ background: opt.swatch }"></span>
-        <span class="fselect__option-label">{{ opt.label }}</span>
-      </label>
+    <div
+      v-if="open"
+      class="fselect__panel"
+      :role="multi ? 'group' : 'listbox'"
+      :aria-label="label + (multi ? ': select one or more options' : ' list')"
+      @keydown="onPanelKeydown"
+    >
+      <template v-if="multi">
+        <!-- Native checkboxes are already fully keyboard-operable; the group
+             just needs a meaningful name for screen readers. -->
+        <label v-for="opt in options" :key="'m-' + opt.value" class="fselect__option" @click="selectOption(opt.value)">
+          <input
+            type="checkbox"
+            :checked="selected.includes(opt.value)"
+            @change="toggle(opt.value)"
+          />
+          <span v-if="opt.swatch" class="fselect__swatch" :style="{ background: opt.swatch }"></span>
+          <span class="fselect__option-label">{{ opt.label }}</span>
+        </label>
+      </template>
+      <template v-else>
+        <!-- Single-select listbox with roving tabindex: one tab stop (the
+             trigger), arrow keys move focus, Enter/Space selects. -->
+        <button
+          v-for="(opt, i) in options"
+          :key="'o-' + opt.value"
+          type="button"
+          role="option"
+          ref="optionEls"
+          class="fselect__option"
+          :tabindex="i === activeIndex ? 0 : -1"
+          :aria-selected="selected.includes(opt.value)"
+          @click="selectOption(opt.value)"
+        >
+          <span class="fselect__radio" :class="{ 'fselect__radio--on': selected.includes(opt.value) }"></span>
+          <span v-if="opt.swatch" class="fselect__swatch" :style="{ background: opt.swatch }"></span>
+          <span class="fselect__option-label">{{ opt.label }}</span>
+        </button>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue';
+import { nextTick, onBeforeUnmount, ref } from 'vue';
 import { MdIcon } from '../../ui';
 
 export interface FilterOption {
@@ -59,11 +94,47 @@ const emit = defineEmits<{
 
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
+const btnRef = ref<HTMLButtonElement | null>(null);
+// Collected by the `ref="optionEls"` v-for (single-select mode only); Vue
+// hands this a plain array of elements in render order.
+const optionEls = ref<Array<HTMLElement | null>>([]);
+// Roving-tabindex position inside the listbox. Re-derived on every open so it
+// always comes from the current selection rather than stale state.
+const activeIndex = ref(-1);
+
+function initialActiveIndex(): number {
+  const idx = props.options.findIndex(o => props.selected.includes(o.value));
+  return idx >= 0 ? idx : Math.min(0, props.options.length - 1);
+}
+
+function openPanel(source: 'pointer' | 'keyboard'): void {
+  if (open.value) return;
+  activeIndex.value = initialActiveIndex();
+  open.value = true;
+  // APG combobox listbox pattern: opening from the keyboard moves focus into
+  // the listbox so the user can immediately arrow through options.
+  if (source === 'keyboard' && !props.multi) {
+    void nextTick().then(() => optionEls.value[activeIndex.value]?.focus());
+  }
+}
+
+function closePanel(restoreFocus: boolean): void {
+  const wasOpen = open.value;
+  open.value = false;
+  if (wasOpen && restoreFocus) btnRef.value?.focus();
+}
+
+function toggleOpen(e: MouseEvent): void {
+  // Keyboard activation of a button arrives as a click with `detail` 0.
+  const source = e.detail === 0 ? 'keyboard' : 'pointer';
+  if (open.value) closePanel(true);
+  else openPanel(source);
+}
 
 function toggle(value: string) {
   if (!props.multi) {
     emit('update', [value]);
-    open.value = false;
+    closePanel(true);
     return;
   }
   const next = props.selected.includes(value)
@@ -72,15 +143,63 @@ function toggle(value: string) {
   emit('update', next);
 }
 
-// Single-select options have no checkbox input, so the label click must drive
+// Single-select options have no checkbox input, so the button click must drive
 // the selection. Multi-select is handled by the checkbox's @change instead.
 function selectOption(value: string) {
   if (!props.multi) toggle(value);
 }
 
+/**
+ * Keyboard handling inside the open panel:
+ * - single-select: arrow keys / Home / End move the roving focus (listbox pattern)
+ * - both modes: Escape closes and returns focus to the trigger button.
+ */
+function onPanelKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closePanel(true);
+    return;
+  }
+
+  if (props.multi) return; // native checkboxes are already fully keyboard-operable
+
+  const n = props.options.length;
+  if (n === 0) return;
+  let idx: number | null = null;
+  switch (e.key) {
+    case 'ArrowDown':
+      idx = activeIndex.value + 1;
+      break;
+    case 'ArrowUp':
+      idx = activeIndex.value - 1;
+      break;
+    case 'Home':
+      idx = 0;
+      break;
+    case 'End':
+      idx = n - 1;
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+  const wrapped = ((idx % n) + n) % n;
+  activeIndex.value = wrapped;
+  void nextTick().then(() => optionEls.value[wrapped]?.focus());
+}
+
+// Opening with ArrowDown from the trigger is the keyboard entry point to the listbox.
+function onBtnKeydown(e: KeyboardEvent): void {
+  if (!open.value && e.key === 'ArrowDown') {
+    e.preventDefault();
+    openPanel('keyboard');
+  }
+}
+
 function onDocMouseDown(e: MouseEvent) {
   if (root.value && !root.value.contains(e.target as Node)) {
-    open.value = false;
+    // If focus had wandered into the panel, hand it back to the trigger.
+    closePanel(root.value.contains(document.activeElement));
   }
 }
 
@@ -187,5 +306,17 @@ onBeforeUnmount(() => {
 
 .fselect__option input[type='checkbox'] {
   accent-color: var(--md-primary);
+}
+
+/* Single-select options are real buttons; strip their native chrome so they
+   line up visually with the multi-select label rows. */
+button.fselect__option {
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: none;
+  font: inherit;
+  width: 100%;
+  text-align: left;
 }
 </style>
