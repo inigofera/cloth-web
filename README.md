@@ -15,7 +15,7 @@ A web app for managing clothing items and outfits, backed by Supabase (Postgres 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/tables` | GET | List public tables with columns and types |
-| `/db/:table` | GET / POST | Read rows (max 100) / insert a row |
+| `/db/:table` | GET / POST | Read rows (`?limit=` up to 10,000; total reported via `X-Total-Count` header) / insert a row |
 | `/db/:table/:id` | PATCH / DELETE | Update / delete a row (user-scoped tables only) |
 | `/outfits` | GET / POST | List outfits with items / create an outfit |
 | `/upload` | POST | Upload an image to Supabase Storage, returns public URL |

@@ -434,12 +434,13 @@ Queries `information_schema.tables` and `information_schema.columns` where `tabl
 #### 2. Dynamic Generic Relational CRUD
 - **`GET /db/:table`**: Validates table existence in `public`. Checks for the presence of a `user_id` column. If present, executes:
   ```sql
-  SELECT to_jsonb(t) AS row FROM public."{table}" t WHERE t.user_id = $1 ORDER BY 1 LIMIT 500
+  SELECT to_jsonb(t) AS row FROM public."{table}" t WHERE t.user_id = $1 ORDER BY 1 LIMIT $2
   ```
   If absent (shared reference tables), reads without user filtering:
   ```sql
-  SELECT to_jsonb(t) AS row FROM public."{table}" t ORDER BY 1 LIMIT 500
+  SELECT to_jsonb(t) AS row FROM public."{table}" t ORDER BY 1 LIMIT $1
   ```
+  Row counts are capped by a client-adjustable `?limit=` query parameter (default and hard ceiling: `TABLE_ROWS_MAX_LIMIT` = 10,000). Every response carries the table's total row count in an `X-Total-Count` header so clients can detect truncation instead of silently receiving partial data (see UX_ANALYSIS.md, problem 1 / P1-B1).
 - **`POST /db/:table`**:
   - Restricts insertions strictly to user-scoped tables (shared reference tables return `403 Forbidden`).
   - Validates any supplied `image_path` using `validate_image_path` to guarantee it points to `users/{user_id}/...`.
@@ -529,7 +530,8 @@ Queries `information_schema.tables` and `information_schema.columns` where `tabl
 ### 5.2 Application Shell & Tab Lifecycle (`App.vue`)
 - Mounts `#app` with an `MdAppBar` and `MdNavDrawer`.
 - Nav items: `clothes` (Clothes), `outfits` (Outfits), `insights` (Insights), `tables` (Tables).
-- Uses Vue's `<KeepAlive>` component wrapping `<component>` views. Tab switching preserves component state, form drafts, active search filters, and scroll positions without re-fetching data.
+- Uses Vue's `<KeepAlive>` around the tab views. Tab switching preserves component state, form drafts, active search filters, and scroll positions.
+- All tabs read from one shared wardrobe snapshot (`lib/wardrobe.ts`). Local mutations update the snapshot immediately, so every tab stays consistent; `onActivated` triggers a background refresh when the snapshot is older than 30 seconds, catching changes made in another tab or device without replacing the UI with a loading state.
 
 ### 5.3 Client-Side Routing & Deep Linking (`frontend/src/lib/router.ts`)
 Cloth Web implements a lightweight, zero-dependency browser hash router (`useRouter()`):
@@ -557,7 +559,7 @@ Centralized error handling engine (`classifyError`):
 ### 5.6 Reversible Mutation Engine (`frontend/src/lib/undo.ts`)
 Provides user safeguards for destructive actions:
 - `UndoManager`: In-memory stack holding the last 5 user mutations (`type`, `itemId`, `name`, `undo` closure).
-- Used during clothing item deletions: Deleting an item triggers a `Toast.vue` with an "Undo" button. Clicking undo restores the item immediately without leaving the screen.
+- Currently wired to the clothing-item **Deactivate** action, which shows a `Toast.vue` with an "Undo" button. Permanent item and outfit deletions are not yet undoable.
 
 ### 5.7 Client-Side Input Sanitization (`frontend/src/lib/sanitize.ts`)
 Mirrors the backend sanitization rules in TypeScript to provide instant form validation:
@@ -571,6 +573,17 @@ Mirrors the backend sanitization rules in TypeScript to provide instant form val
   3. Enforces 10 MiB size ceiling.
   4. Inspects leading 16 bytes for magic-byte signatures via `Uint8Array`.
   5. Decodes dimensions via `createImageBitmap` or `Image()`, rejecting corrupt files or images wider/taller than 8000px.
+
+### 5.8 Shared Wardrobe Store (`frontend/src/lib/wardrobe.ts`)
+A singleton reactive store owns the session's view of the wardrobe: `items`, `outfits`, `colors`, `categories`, `subcategories`, and `brands`. It solves the cross-tab staleness that arises from `<KeepAlive>` + per-view `onMounted` fetches.
+- **`load({ force?, maxAgeMs? })`** — deduplicates concurrent loads, skips the request when a fresh snapshot exists, and only shows the full-screen loading state when no data has loaded yet.
+- **`refresh()`** — forced reload, used by retry actions.
+- **`onActivated` integration** — each view calls `load({ maxAgeMs: 30_000 })` when re-activated, so external changes are picked up in the background while cached data remains visible.
+- **Mutation helpers** — `addItem`, `replaceItem`, `patchItem`, `removeItem`, `addOutfit`, `removeOutfit`, and reference-data adders update the shared snapshot. Item edits/deletes also update the joined item snapshots stored on outfits; outfit add/delete adjusts wear counts locally to mirror the backend.
+- **Revision guard** — a refresh that was in flight before a local mutation cannot overwrite the newer local state when it resolves.
+- **Error policy** — a failed initial load surfaces an error; a failed background refresh keeps the cached snapshot instead of blanking the view.
+
+`ClothesView`, `OutfitsView`, and `InsightsView` all consume this store; Insights derives its denormalized dataset from it via a `computed`.
 
 ---
 
@@ -666,7 +679,7 @@ graph TD
 ```
 
 ### 8.1 Data Layer & In-Memory Enrichment (`InsightsView.vue`)
-On mounting, the Insights tab fetches all user garments, logged outfits, colors, categories, subcategories, and brands in parallel via `Promise.all`.
+Insights derives its data from the shared wardrobe store (`lib/wardrobe.ts`) through a `computed` dataset. It therefore reacts immediately to items/outfits added, edited, or deleted in the Clothes and Outfits tabs, and refreshes in the background when re-activated after the snapshot goes stale.
 The `buildDataset()` routine creates an in-memory denormalized graph:
 - Resolves foreign keys to human-readable names (`category_name`, `subcategory_name`, `brand_name`).
 - Attaches color hex values (`color_hex`) to garments.
