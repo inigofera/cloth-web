@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
+use crate::cache::CachedImage;
 
 #[derive(Serialize, FromRow)]
 pub struct ColumnInfo {
@@ -25,17 +26,27 @@ pub async fn list_tables(
     State(state): State<Arc<AppState>>,
     _auth: AuthUser,
 ) -> Json<Vec<ColumnInfo>> {
-    let rows = sqlx::query_as::<_, ColumnInfo>(
-        "SELECT t.table_name, c.column_name, c.data_type
-         FROM information_schema.tables t
-         JOIN information_schema.columns c 
-           ON t.table_name = c.table_name AND t.table_schema = c.table_schema
-         WHERE t.table_schema = 'public' AND t.table_name != 'user-settings'
-         ORDER BY t.table_name, c.ordinal_position"
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap();
+    // One schema read serves the whole app: the tables tab used to pay its own JOIN over
+    // information_schema, the same questions the CRUD surface asked. Refreshing here keeps
+    // the listing honest after a migration while the CRUD endpoints keep paying none.
+    state.schema.refresh(&state.db).await;
+
+    let facts_list = state.schema.snapshot();
+    let mut rows: Vec<ColumnInfo> = vec![];
+    for facts in facts_list {
+        if is_generic_crud_table_blocked(&facts.name) {
+            continue;
+        }
+        for column in facts.columns {
+            rows.push(
+                ColumnInfo {
+                    table_name: facts.name.clone(),
+                    column_name: column.column_name.clone(),
+                    data_type: column.data_type.clone(),
+                }
+            );
+        }
+    }
 
     Json(rows)
 }
@@ -45,55 +56,12 @@ pub fn is_generic_crud_table_blocked(table: &str) -> bool {
 }
 
 
-async fn is_allowed_table(pool: &sqlx::Pool<sqlx::Postgres>, table: &str) -> anyhow::Result<bool> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
-    )
-    .bind(table)
-    .fetch_one(pool)
-    .await?;
-    Ok(exists)
-}
+// The questions the CRUD surface used to ask Postgres per request - does this table exist,
+// is it scoped to one user, which columns does it carry - are answered by the schema
+// snapshot in AppState (see db.rs). Nothing here queries the schema any more; the shapes
+// were rendered once per table at startup.
 
-async fn table_has_user_id(pool: &sqlx::Pool<sqlx::Postgres>, table: &str) -> anyhow::Result<bool> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'user_id')"
-    )
-    .bind(table)
-    .fetch_one(pool)
-    .await?;
-    Ok(exists)
-}
-
-async fn table_has_column(
-    pool: &sqlx::Pool<sqlx::Postgres>,
-    table: &str,
-    column: &str,
-) -> anyhow::Result<bool> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)"
-    )
-    .bind(table)
-    .bind(column)
-    .fetch_one(pool)
-    .await?;
-    Ok(exists)
-}
-
-async fn table_column_names(
-    pool: &sqlx::Pool<sqlx::Postgres>,
-    table: &str,
-) -> anyhow::Result<Vec<String>> {
-    let cols = sqlx::query_scalar::<_, String>(
-        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position"
-    )
-    .bind(table)
-    .fetch_all(pool)
-    .await?;
-    Ok(cols)
-}
-
-fn quote_ident(table: &str) -> String {
+pub fn quote_ident(table: &str) -> String {
     table.replace('"', "\"")
 }
 
@@ -112,6 +80,11 @@ fn db_write_error(error: SqlxError) -> (StatusCode, String) {
 /// silently dropping rows (see UX_ANALYSIS.md, problem 1 / P1-B1).
 const TABLE_ROWS_MAX_LIMIT: i64 = 10_000;
 
+/// X-Total-Count is the server's own total for the query, counted before the page
+/// was cut (`COUNT(*) OVER ()` folded into the list queries), so it is exact even
+/// when a page is shorter than the total. A client that sees rows shorter than
+/// this total knows the table was capped, not emptied (see UX_ANALYSIS.md, problem
+/// 1 / P1-B1).
 fn with_total_count(total: i64, rows: Vec<JsonValue>) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
     let mut headers = axum::http::HeaderMap::new();
     // An integer always parses as a valid header value; the if-let keeps this
@@ -121,6 +94,7 @@ fn with_total_count(total: i64, rows: Vec<JsonValue>) -> (axum::http::HeaderMap,
     }
     (headers, Json(rows))
 }
+
 pub async fn get_table_rows(
     State(state): State<Arc<AppState>>,
     Path(table): Path<String>,
@@ -134,59 +108,66 @@ pub async fn get_table_rows(
         ));
     }
 
-    if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Ok(with_total_count(0, vec![]));
+    // The table's shape comes from the snapshot built at startup: does it exist, is it
+    // scoped to one user, which columns may a page order on. Asking Postgres these
+    // questions per request was the cost this cache removes, so an unknown table is
+    // answered from memory rather than a schema read before the 404 or empty page.
+    let facts = state.schema.facts(&state.db, table.to_string()).await;
+    match facts {
+        None => return Ok(with_total_count(0, vec![])),
+        Some(found) => {
+            // Clients may request up to TABLE_ROWS_MAX_LIMIT rows, and may ask for
+            // a page that starts anywhere: `offset` is a real row offset, so a client
+            // can walk a big table page by page instead of paying for one capped dump
+            // whose missing rows it cannot even name. The default is the cap itself: a
+            // personal wardrobe will not come close to it, and anything beyond is made
+            // visible through X-Total-Count rather than hidden.
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|l| *l >= 1)
+                .map(|l| l.min(TABLE_ROWS_MAX_LIMIT))
+                .unwrap_or(TABLE_ROWS_MAX_LIMIT);
+            let offset = params
+                .get("offset")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|o| *o >= 0)
+                .unwrap_or(0);
+
+            // One statement carries the rows and the count: `COUNT(*) OVER ()` runs after
+            // the row filter but before the page is cut, so `X-Total-Count` reports the
+            // rows that exist rather than the rows this page happens to include, and a
+            // truncated page still tells the UI how much data was left out - without
+            // scanning the same rows a second time for the total.
+            let rows = match found.has_user_id {
+                true => sqlx::query(&found.scoped_rows_sql)
+                    .bind(user_id)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap(),
+                false => sqlx::query(&found.shared_rows_sql)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap(),
+            };
+
+            let total: i64 = match rows.first() {
+                None => 0,
+                Some(row) => row.get::<i64, _>("total"),
+            };
+
+            let result: Vec<JsonValue> = rows
+                .into_iter()
+                .map(|r| r.get::<JsonValue, _>("row"))
+                .collect();
+
+            Ok(with_total_count(total, result))
+        }
     }
-
-    let quoted_table = quote_ident(&table);
-    let has_user_id = table_has_user_id(&state.db, &table).await.unwrap_or(false);
-
-    // Clients may request up to TABLE_ROWS_MAX_LIMIT rows. The default is the cap
-    // itself: a personal wardrobe will not come close to it, and anything beyond
-    // is made visible through X-Total-Count rather than hidden.
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|l| *l >= 1)
-        .map(|l| l.min(TABLE_ROWS_MAX_LIMIT))
-        .unwrap_or(TABLE_ROWS_MAX_LIMIT);
-
-    // Report the total row count so the UI can detect when a capped snapshot is
-    // incomplete and tell the user exactly how much data was loaded.
-    let total: i64 = if has_user_id {
-        sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM public.\"{}\" WHERE user_id = $1",
-            quoted_table
-        ))
-        .bind(user_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap()
-    } else {
-        let query = format!("SELECT COUNT(*) FROM public.{}", quoted_table);
-        sqlx::query_scalar(&query).fetch_one(&state.db).await.unwrap()
-    };
-
-    let rows = if has_user_id {
-        let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t WHERE t.user_id = $1 ORDER BY 1 LIMIT $2",
-            quoted_table
-        );
-        sqlx::query(&query).bind(user_id).bind(limit).fetch_all(&state.db).await.unwrap()
-    } else {
-        let query = format!(
-            "SELECT to_jsonb(t) AS row FROM public.\"{}\" t ORDER BY 1 LIMIT $1",
-            quoted_table
-        );
-        sqlx::query(&query).bind(limit).fetch_all(&state.db).await.unwrap()
-    };
-
-    let result: Vec<JsonValue> = rows
-        .into_iter()
-        .map(|r| r.get::<JsonValue, _>("row"))
-        .collect();
-
-    Ok(with_total_count(total, result))
 }
 
 pub async fn insert_table_row(
@@ -202,11 +183,20 @@ pub async fn insert_table_row(
         ));
     }
 
-    if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Err((StatusCode::NOT_FOUND, "table not found".into()));
-    }
-
-    if !table_has_user_id(&state.db, &table).await.unwrap_or(false) {
+    // Existence, ownership, and the columns an insert may copy all come from the schema
+    // snapshot taken at startup. A body that names a column the snapshot never heard of -
+    // a migration that added one - costs that single request one schema read, rather than
+    // every request paying three or four.
+    let keys: Vec<String> = match payload.as_object() {
+        None => vec![],
+        Some(obj) => obj.keys().map(|k| k.to_string()).collect(),
+    };
+    let facts = state.schema.facts_for_write(&state.db, table.to_string(), &keys).await;
+    let found = match facts {
+        None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
+        Some(facts) => facts,
+    };
+    if !found.has_user_id {
         return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
     }
 
@@ -225,29 +215,9 @@ pub async fn insert_table_row(
         }
     }
 
-    let quoted_table = quote_ident(&table);
-    let columns = table_column_names(&state.db, &table).await.unwrap_or_default();
-    let select_list = if columns.is_empty() {
-        "r.*".to_string()
-    } else {
-        columns
-            .iter()
-            .map(|c| match c.as_str() {
-                "created_at" | "updated_at" => format!("COALESCE(r.\"{}\", now()) AS \"{}\"", c, c),
-                _ => format!("r.\"{}\"", c),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let cte = format!(
-        "WITH r AS (\n  SELECT * FROM json_populate_record(NULL::public.\"{}\", $1::json)\n)\n,\ninserted AS (\n  INSERT INTO public.\"{}\"\n  SELECT {} FROM r\n  RETURNING *\n)\nSELECT to_jsonb(inserted.*) AS row FROM inserted",
-        quoted_table,
-        quoted_table,
-        select_list,
-    );
-
-    let row: Option<(JsonValue,)> = sqlx::query_as(&cte)
+    // The statement shape per table was decided at startup, so this request sends one
+    // statement: the row is read back from the same insert, not re-queried after it.
+    let row: Option<(JsonValue,)> = sqlx::query_as(&found.insert_sql)
         .bind(payload)
         .fetch_optional(&state.db)
         .await
@@ -275,25 +245,38 @@ pub async fn delete_table_row(
             "use DELETE /outfits/:id to delete outfits".into(),
         ));
     }
-    if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Err((StatusCode::NOT_FOUND, "table not found".into()));
-    }
-    if !table_has_user_id(&state.db, &table).await.unwrap_or(false) {
+    // Existence and ownership come from the startup snapshot, and the statement was
+    // rendered once per table. A uuid-keyed table compares its id column against a uuid
+    // parameter, so the primary-key index answers the lookup rather than casting the
+    // column on every row it walked.
+    let facts = state.schema.facts(&state.db, table.to_string()).await;
+    let found = match facts {
+        None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
+        Some(facts) => facts,
+    };
+    if !found.has_user_id {
         return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
     }
 
-    let quoted_table = quote_ident(&table);
-    let sql = format!(
-        "WITH deleted AS (\n  DELETE FROM public.\"{}\" WHERE id::text = $1 AND user_id = $2 RETURNING *\n)\nSELECT to_jsonb(deleted.*) AS row FROM deleted",
-        quoted_table
-    );
-
-    let row: Option<(JsonValue,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap();
+    let row: Option<(JsonValue,)> = match found.id_kind.as_str() {
+        "uuid" => match Uuid::parse_str(&id) {
+            // An id that is not a uuid cannot name a uuid-keyed row: the answer is no row,
+            // the same answer a lookup that matched nothing used to give.
+            Err(_) => None,
+            Ok(target) => sqlx::query_as(&found.delete_sql)
+                .bind(target)
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap(),
+        },
+        _ => sqlx::query_as(&found.delete_sql)
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap(),
+    };
 
     Ok(Json(row.map(|t| t.0)))
 }
@@ -311,10 +294,14 @@ pub async fn update_table_row(
         ));
     }
 
-    if !is_allowed_table(&state.db, &table).await.unwrap_or(false) {
-        return Err((StatusCode::NOT_FOUND, "table not found".into()));
-    }
-    if !table_has_user_id(&state.db, &table).await.unwrap_or(false) {
+    // Existence, ownership, and whether this table even has an `updated_at` column all
+    // come from the snapshot: no schema round trip on the way to the write.
+    let facts = state.schema.facts(&state.db, table.to_string()).await;
+    let found = match facts {
+        None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
+        Some(facts) => facts,
+    };
+    if !found.has_user_id {
         return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
     }
 
@@ -339,31 +326,40 @@ pub async fn update_table_row(
         return Ok(Json(None));
     }
 
-    let quoted_table = quote_ident(&table);
     let mut set_parts: Vec<String> = cols
         .iter()
         .map(|c| format!("\"{}\" = r.\"{}\"", c, c))
         .collect();
-    let has_updated_at = table_has_column(&state.db, &table, "updated_at").await.unwrap_or(false);
-    if has_updated_at && !cols.iter().any(|c| c == "updated_at") {
+    if found.has_updated_at && !cols.iter().any(|c| c == "updated_at") {
         set_parts.push("\"updated_at\" = now()".to_string());
     }
     let set_cols = set_parts.join(", ");
 
-    let sql = format!(
-        "WITH r AS (\n  SELECT * FROM json_populate_record(NULL::public.\"{}\", $2::json)\n)\nUPDATE public.\"{}\" AS t\nSET {}\nFROM r\nWHERE t.id::text = $1 AND t.user_id = $3\nRETURNING to_jsonb(t) AS row",
-        quoted_table,
-        quoted_table,
-        set_cols
-    );
+    // Head and tail were rendered for this table at startup; only the columns this request
+    // asked for are written between them.
+    let update_head = found.update_head;
+    let update_tail = found.update_tail;
+    let sql = format!("{update_head}{set_cols}{update_tail}");
 
-    let row: Option<(JsonValue,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .bind(payload)
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(db_write_error)?;
+    let row: Option<(JsonValue,)> = match found.id_kind.as_str() {
+        "uuid" => match Uuid::parse_str(&id) {
+            Err(_) => None,
+            Ok(target) => sqlx::query_as(&sql)
+                .bind(target)
+                .bind(payload)
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(db_write_error)?,
+        },
+        _ => sqlx::query_as(&sql)
+            .bind(id)
+            .bind(payload)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_write_error)?,
+    };
 
     Ok(Json(row.map(|t| t.0)))
 }
@@ -474,35 +470,62 @@ pub struct CreateOutfitRequest {
     pub image_path: Option<String>,
 }
 
-const OUTFITS_WITH_ITEMS_SQL: &str =
+// The outfit query in two named pieces: the columns it reads, and the rows it reads them
+// from. Callers used to bolt an extra clause onto one long string, which silently relied on
+// where that string happened to end; named pieces make the two shapes explicit - a page and
+// a single outfit - and let the page carry its own total.
+//
+// The page carries an outfit's item ids and nothing else. The full clothing row used to be
+// copied into every outfit that names it, so an item worn 50 times crossed the wire 50 times
+// with all of its fields; the ids keep the join (`ORDER BY ci.name`) the view renders in,
+// while the single copy of each item the client already holds does the rest.
+const OUTFITS_ROW_EXPR: &str =
     "SELECT to_jsonb(o) || jsonb_build_object(\n\
      'date', to_char(o.date, 'YYYY-MM-DD'),\n\
-     'items', COALESCE((\n\
-     SELECT jsonb_agg(to_jsonb(ci) ORDER BY ci.name)\n\
+     'item_ids', COALESCE((\n\
+     SELECT jsonb_agg(oi.clothing_item_id ORDER BY ci.name)\n\
      FROM \"outfit-items\" oi\n\
      JOIN \"clothing-items\" ci ON ci.id = oi.clothing_item_id\n\
      WHERE oi.outfit_id = o.id\n\
-     ), '[]'::jsonb)) AS row\n\
-     FROM outfits o\n\
-     WHERE o.user_id = $1";
+     ), '[]'::jsonb)) AS row";
+
+const OUTFITS_FROM_SCOPED: &str = "FROM outfits o WHERE o.user_id = $1";
 
 pub async fn list_outfits(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
+    Query(params): Query<HashMap<String, String>>,
 ) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
-    let sql = format!("{OUTFITS_WITH_ITEMS_SQL} ORDER BY o.date");
+    // Paging and the total in one statement: `COUNT(*) OVER ()` counts the rows the
+    // filter matched before the page is cut, so the completeness signal costs no second
+    // pass over the join that builds the ids, and a client may ask to start anywhere.
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|l| *l >= 1)
+        .map(|l| l.min(TABLE_ROWS_MAX_LIMIT))
+        .unwrap_or(TABLE_ROWS_MAX_LIMIT);
+    let offset = params
+        .get("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|o| *o >= 0)
+        .unwrap_or(0);
+
+    let sql = format!(
+        "{OUTFITS_ROW_EXPR}, COUNT(*) OVER () AS total {OUTFITS_FROM_SCOPED} ORDER BY o.date LIMIT $2 OFFSET $3",
+    );
     let rows = sqlx::query(&sql)
         .bind(user_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&state.db)
         .await
         .unwrap();
 
-    // Same completeness signal as /db/:table (X-Total-Count, UX_ANALYSIS.md P1-B1).
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outfits WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
+    let total: i64 = match rows.first() {
+        None => 0,
+        Some(row) => row.get::<i64, _>("total"),
+    };
 
     with_total_count(
         total,
@@ -517,6 +540,25 @@ pub async fn create_outfit(
 ) -> Result<Json<JsonValue>, (StatusCode, String)> {
     if let Some(ref path) = req.image_path {
         validate_image_path(&serde_json::to_value(path).unwrap(), &user_id)?;
+    }
+
+    // Resolve the ids this request names before building any SQL, and drop repeats: the
+    // statement below carries uuids this server produced, never text the client chose, and
+    // one outfit cannot point at the same item twice.
+    if req.item_ids.len() > 200 {
+        return Err((StatusCode::BAD_REQUEST, "an outfit cannot carry more than 200 items".to_string()));
+    }
+
+    let mut item_literals: Vec<String> = vec![];
+    for raw_id in &req.item_ids {
+        match Uuid::parse_str(raw_id) {
+            Err(_) => return Err((StatusCode::BAD_REQUEST, "item id is not a uuid".to_string())),
+            Ok(item_uuid) => {
+                if !item_literals.iter().any(|seen| *seen == item_uuid.to_string()) {
+                    item_literals.push(item_uuid.to_string());
+                }
+            },
+        }
     }
 
     let mut tx = state
@@ -544,15 +586,16 @@ pub async fn create_outfit(
         .unwrap_or_default()
         .to_string();
 
-    for item_id in &req.item_ids {
-        sqlx::query(
-            "INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES ($1::uuid, $2::uuid)",
-        )
+    // Every link this request asks for goes over the wire in one statement, rather than
+    // one round trip per item: an outfit with a dozen pieces used to pay a dozen queries.
+    if !item_literals.is_empty() {
+        let pairs: Vec<String> = item_literals.iter().map(|literal| format!("($1::uuid, '{}')", literal)).collect();
+        let link_sql = format!("INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES {}", pairs.join(", "));
+        sqlx::query(&link_sql)
         .bind(&outfit_id)
-        .bind(item_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not link item: {e}")))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not link items: {e}")))?;
     }
 
     sqlx::query(
@@ -567,17 +610,20 @@ pub async fn create_outfit(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not update wear counts: {e}")))?;
 
+    // The outfit the caller gets back is read from inside the same transaction that made it,
+    // so the links above are already visible to it; no second round trip after the commit,
+    // and no window where the outfit exists but its items do not.
+    let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2");
+    let created: (JsonValue,) = sqlx::query_as(&created_sql)
+    .bind(user_id)
+    .bind(&outfit_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the outfit: {e}")))?;
+
     tx.commit()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let sql = format!("{OUTFITS_WITH_ITEMS_SQL} AND o.id::text = $2");
-    let created: (JsonValue,) = sqlx::query_as(&sql)
-        .bind(user_id)
-        .bind(&outfit_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
 
     Ok(Json(created.0))
 }
@@ -1407,11 +1453,25 @@ pub async fn generate_outfit_preview(
     )?;
 
     let key = format!("users/{user_id}/{}-tryon.jpg", Uuid::new_v4());
+    // Generate the thumbnails before the upload below takes the bytes.
+    let thumbs = crate::upload::thumbs_from_stored(&processed_bytes);
+
     state
         .storage
         .upload_file(&key, processed_bytes)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save generated image: {e}")))?;
+
+    // A preview is displayed like any other image (`?width=480` on the grid), so
+    // it gets the same thumbnail objects: without them every view of a preview
+    // would re-download and re-decode the 1600px original.
+    for (thumb_width, thumb_bytes) in thumbs {
+        let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
+        match state.storage.upload_file(&thumb_key, thumb_bytes).await {
+            Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
+            Ok(_) => {},
+        };
+    };
 
     Ok(Json(GeneratePreviewResponse {
         image_path: key,
@@ -1547,10 +1607,28 @@ pub async fn upload_file(
         };
         let key = crate::upload::build_storage_key(&user_id, &key_name);
 
+        // Generate the small thumbnails from the processed bytes *before* the
+        // upload below moves them (`upload.rs`: `THUMB_WIDTHS`).
+        let thumbs = crate::upload::thumbs_from_stored(&data);
+
         storage
             .upload_file(&key, data)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage upload failed: {e}")))?;
+
+        // Also store those thumbnails next to the image, so `/files/*path?width=`
+        // can answer with a copy of a small stored object (`serve_file` below)
+        // instead of downloading the full-resolution original and decoding it
+        // once per `<img>` on every page load. The image itself is already
+        // stored, so a thumbnail write is best effort: failing one only means
+        // that width falls back to resizing the original.
+        for (thumb_width, thumb_bytes) in thumbs {
+            let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
+            match storage.upload_file(&thumb_key, thumb_bytes).await {
+                Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
+                Ok(_) => {},
+            };
+        };
 
         return Ok(Json(storage.get_public_url(&key).await));
     }
@@ -1643,41 +1721,153 @@ fn validate_image_path(value: &JsonValue, user_id: &Uuid) -> Result<(), (StatusC
     Ok(())
 }
 
+/// Cache key for a `/files` response: the object path plus the *effective*
+/// width. The width belongs in the key because they are different responses —
+/// without it, a cached `?width=480` thumbnail could answer a later request for
+/// the untouched original (or the other way round).
+fn image_cache_key(path: &str, width: Option<u32>) -> String {
+    match width {
+        None => format!("{path}?original"),
+        Some(w) => format!("{path}?width={w}"),
+    }
+}
+
+/// Build the response for a served image. Object keys carry a random UUID
+/// (`upload.rs`: `build_storage_key`) and a thumbnail keeps the `{uuid}-`
+/// prefix of its source object, so no `/files` URL can ever change: the
+/// browser may cache a hit for a year and never revalidate it.
+fn image_response(image: CachedImage) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, image.content_type)
+        .header("cache-control", "public, max-age=31536000, immutable")
+        .body(axum::body::Body::from(image.body))
+        .unwrap()
+}
+
+/// Serve a `?width=` request from the thumbnail objects written next to the
+/// image at upload time (`upload.rs`: `THUMB_WIDTHS`, `thumb_storage_key`).
+/// The bucket that covers the request is a small stored JPEG, so the exact-bucket
+/// case — every grid thumbnail (`?width=480`) — is a byte copy: the original is
+/// never downloaded and nothing is decoded. A narrower request (`?width=56` for
+/// the picker, `?width=28` for the widget) is resized *from that bucket* rather
+/// than from the full-resolution original.
+/// `None` means the bucket object is missing, i.e. the image predates this
+/// change, so `/files` falls back to `served_from_original`.
+async fn served_from_thumb(state: Arc<AppState>, path: &str, width: u32) -> Option<CachedImage> {
+    let bucket = match crate::upload::thumbnail_bucket(width) {
+        None => return None,
+        Some(b) => b,
+    };
+    let thumb_key = crate::upload::thumb_storage_key(path, bucket);
+    let thumb_bytes = match state.storage.download_file(&thumb_key).await {
+        Err(_) => return None,
+        Ok((bytes, _)) => bytes,
+    };
+
+    if bucket == width {
+        // Exact match for the widths the UI asks for: the response *is* the
+        // stored object, copied straight through with no decode at all.
+        return Some(CachedImage { body: thumb_bytes, content_type: "image/jpeg".to_string() });
+    }
+
+    // Below the bucket: resize the small object we already hold, so the 4032px
+    // original is never decoded to make a 28px thumb.
+    match resize_image(&thumb_bytes, width) {
+        None => Some(CachedImage { body: thumb_bytes, content_type: "image/jpeg".to_string() }),
+        Some(smaller) => Some(CachedImage { body: smaller, content_type: "image/jpeg".to_string() }),
+    }
+}
+
+/// Fallback when no generated thumbnail exists for `path`: read the original,
+/// resize it when asked, and opportunistically store the thumbnails that can be
+/// made from the bytes already fetched, so the *next* request for this image
+/// takes the byte-copy path above. Images that predate upload-time thumbnails
+/// therefore heal themselves one request after the first.
+///
+/// A thumbnail write that fails is logged but never fails the response: the
+/// image itself is already on its way out.
+async fn served_from_original(state: Arc<AppState>, path: &str, width: Option<u32>) -> Option<CachedImage> {
+    let (data, stored_type) = match state.storage.download_file(&path).await {
+        Err(_) => return None,
+        Ok(v) => v,
+    };
+
+    // Never thumbnail an object that is already a thumbnail: that would nest
+    // keys (`...dress.thumb480.thumb96.jpg`) behind a single source image.
+    if !crate::upload::is_thumb_key(&path) {
+        for (thumb_width, thumb_bytes) in crate::upload::thumbs_from_stored(&data) {
+            let thumb_key = crate::upload::thumb_storage_key(&path, thumb_width);
+            match state.storage.upload_file(&thumb_key, thumb_bytes).await {
+                Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
+                Ok(_) => {},
+            };
+        };
+    };
+
+    if width.is_none() {
+        return Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) });
+    }
+
+    match width {
+        Some(w) if w > 0 => match resize_image(&data, w) {
+            Some(resized) => Some(CachedImage { body: resized, content_type: "image/jpeg".to_string() }),
+            None => Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) }),
+        },
+        _ => Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) }),
+    }
+}
+
 pub async fn serve_file(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
     Path(path): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let storage = &state.storage;
-
     // Only serve files that live inside the requesting user's own folder.
     if !object_path_within_user(&path, &user_id) {
         return Err((StatusCode::NOT_FOUND, "file not found".into()));
     }
 
-    let (data, content_type) = match storage.download_file(&path).await {
-        Ok(v) => v,
-        Err(_) => return Err((StatusCode::NOT_FOUND, "file not found".into())),
-    };
-
     let width = params
         .get("width")
         .and_then(|w| w.parse::<u32>().ok())
-        .map(|w| w.min(MAX_SERVE_WIDTH));
+        .map(|w| w.min(MAX_SERVE_WIDTH))
+        .filter(|w| *w > 0);
 
-    let (body, content_type) = match width {
-        Some(w) if w > 0 => match resize_image(&data, w) {
-            Some(resized) => (resized, "image/jpeg".to_string()),
-            None => (data, content_type_for(&path, &content_type)),
-        },
-        _ => (data, content_type_for(&path, &content_type)),
+    let cache_key = image_cache_key(&path, width);
+
+    // A repeat of the exact same URL never touches the network.
+    match state.image_cache.get(&cache_key) {
+        Some(hit) => return Ok(image_response(hit)),
+        None => {},
     };
 
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
-        .body(axum::body::Body::from(body))
-        .unwrap())
+    // Thumbnails first: for the widths the UI asks for this is a copy of a
+    // stored object. Images that predate upload-time thumbnails fall through
+    // to the original.
+    let from_thumb = match width {
+        None => None,
+        Some(w) => match crate::upload::is_thumb_key(&path) {
+            true => None,
+            false => served_from_thumb(state.clone(), &path, w).await,
+        },
+    };
+
+    let served = match from_thumb {
+        Some(image) => Some(image),
+        None => served_from_original(state.clone(), &path, width).await,
+    };
+
+    match served {
+        None => Err((StatusCode::NOT_FOUND, "file not found".into())),
+        Some(image) => {
+            // Keep a copy so the next request for this exact URL skips the
+            // upstream fetch entirely; the response below reuses the bytes we
+            // already have.
+            state.image_cache.put(&cache_key, image.clone());
+            Ok(image_response(image))
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1841,6 +2031,38 @@ mod tests {
         assert!(prompt.contains("- Picture 2: Tops (T-Shirts) in Navy, \"Classic Tee\""));
         assert!(prompt.contains("- Picture 3: Bottoms (Jeans) in Blue, \"Slim Jeans\""));
         assert!(prompt.contains("Remove any existing clothing in Picture 1 that conflicts with these garments."));
+    }
+
+    #[test]
+    fn cache_keys_keep_widths_and_owners_apart() {
+        let mine = format!("users/{ME}/22222222-2222-4222-8222-222222222222-photo.jpg");
+        let other = format!("users/{OTHER}/22222222-2222-4222-8222-222222222222-photo.jpg");
+
+        // Same object, different responses: the untouched original, the 480 px
+        // grid thumbnail and the 96 px widget thumbnail must never answer for
+        // each other.
+        assert_ne!(image_cache_key(&mine, None), image_cache_key(&mine, Some(480)));
+        assert_ne!(image_cache_key(&mine, Some(480)), image_cache_key(&mine, Some(96)));
+        // Two users whose paths otherwise look alike never share a slot.
+        assert_ne!(image_cache_key(&mine, Some(480)), image_cache_key(&other, Some(480)));
+        // A thumbnail object is its own entry, not the source image's.
+        assert_ne!(
+            image_cache_key(&mine, Some(480)),
+            image_cache_key(&crate::upload::thumb_storage_key(&mine, 480), Some(480)),
+        );
+    }
+
+    #[test]
+    fn thumbnail_keys_stay_inside_the_owners_folder() {
+        // `/files` derives thumbnail keys itself and then serves them through
+        // the same ownership check as any other path, so a derived key has to
+        // pass that check for its own owner and be refused for another user.
+        let thumb =
+            crate::upload::thumb_storage_key(&format!("users/{ME}/22222222-2222-4222-8222-222222222222-photo.jpg"), 480);
+        assert!(object_path_within_user(&thumb, &me()));
+
+        let intruder = Uuid::parse_str(OTHER).unwrap();
+        assert!(!object_path_within_user(&thumb, &intruder));
     }
 }
 
