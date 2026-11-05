@@ -108,6 +108,57 @@ pub fn build_storage_key(user_id: &Uuid, sanitized_name: &str) -> String {
     format!("users/{user_id}/{uuid}-{sanitized_name}")
 }
 
+/// JPEG widths written next to every upload, small to large. The UI grid
+/// requests `?width=480` (`frontend/src/.../ClothesView.vue`) and the picker
+/// and widget thumbs request 56px or less, so both land exactly on a bucket:
+/// `/files/*path?width=` can then copy a stored object instead of downloading
+/// the full-resolution original and decoding it once per `<img>` per reload.
+pub const THUMB_WIDTHS: [u32; 2] = [96, 480];
+
+/// Smallest `THUMB_WIDTHS` entry that can serve a `width` px request without
+/// upscaling, or `None` when the request wants more detail than any generated
+/// thumbnail holds (then `/files` resizes the original).
+pub fn thumbnail_bucket(width: u32) -> Option<u32> {
+    for bucket in THUMB_WIDTHS {
+        if width <= bucket {
+            return Some(bucket);
+        }
+    }
+    None
+}
+
+/// Object key of the generated thumbnail for `key`, e.g.
+/// `users/{uid}/{uuid}-dress.jpg` -> `users/{uid}/{uuid}-dress.thumb480.jpg`.
+/// Thumbnails keep the `{uuid}-` prefix of their source object, so they are as
+/// collision-free as the uploads themselves.
+pub fn thumb_storage_key(key: &str, width: u32) -> String {
+    match key.rsplit_once('.') {
+        Some((stem, _)) => format!("{stem}.thumb{width}.jpg"),
+        None => format!("{key}.thumb{width}.jpg"),
+    }
+}
+
+/// True for keys produced by `thumb_storage_key`, so `/files` never treats an
+/// existing thumbnail as an image to thumbnail again (that would nest keys and
+/// re-encode a thumbnail of a thumbnail).
+pub fn is_thumb_key(path: &str) -> bool {
+    for width in THUMB_WIDTHS {
+        if path.contains(&format!(".thumb{width}.jpg")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// JPEG magic check, same sniffing as `validate_image_content`: thumbnails are
+/// only generated for bytes we know are already JPEG.
+pub fn is_jpeg(bytes: &[u8]) -> bool {
+    match bytes {
+        [0xFF, 0xD8, 0xFF, ..] => true,
+        _ => false,
+    }
+}
+
 pub fn exif_orientation(data: &[u8]) -> u16 {
     use exif::{In, Reader, Tag, Value};
     let mut reader = std::io::BufReader::new(std::io::Cursor::new(data));
@@ -249,6 +300,64 @@ pub fn process_and_encode_image_matching_aspect(
     Ok((out, "image/jpeg"))
 }
 
+/// Encode an already-decoded image as the JPEG thumbnail `width` px wide,
+/// keeping aspect ratio and never upscaling (`None` when the image is already
+/// no wider than `width`, so no upscaled copy is written).
+pub fn encode_thumbnail(img: &image::RgbaImage, width: u32) -> Option<Vec<u8>> {
+    let (w, h) = img.dimensions();
+    if w <= width {
+        return None;
+    }
+    let scale = width as f64 / w as f64;
+    let new_h = (h as f64 * scale).round().max(1.0) as u32;
+    let small =
+        image::imageops::resize(img, width, new_h, image::imageops::FilterType::Lanczos3);
+    let rgb = image::DynamicImage::ImageRgba8(small).to_rgb8();
+    let mut out = Vec::new();
+    let encoded = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .is_ok();
+    match encoded {
+        false => {
+            eprintln!("thumbnail encode failed for {width}px image");
+            None
+        },
+        true => Some(out),
+    }
+}
+
+/// Generate every `THUMB_WIDTHS` thumbnail for image bytes that already went
+/// through `compress_image` (EXIF orientation baked in, downscaled, JPEG).
+/// Returns `(width, jpeg bytes)` pairs ready for `thumb_storage_key`.
+///
+/// Non-JPEG bytes get no thumbnails: `compress_image` deliberately passes a
+/// transparent PNG through untouched, and flattening that to JPEG would drop
+/// its transparency, so those images keep being served from the original.
+pub fn thumbs_from_stored(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+    match is_jpeg(bytes) {
+        false => Vec::new(),
+        true => match image::load_from_memory(bytes) {
+            Err(_) => Vec::new(),
+            Ok(img) => {
+                let decoded = img.to_rgba8();
+                let mut thumbs: Vec<(u32, Vec<u8>)> = Vec::new();
+                for width in THUMB_WIDTHS {
+                    match encode_thumbnail(&decoded, width) {
+                        None => {},
+                        Some(body) => thumbs.push((width, body)),
+                    };
+                };
+                thumbs
+            },
+        },
+    }
+}
+
 #[cfg(test)]
 
 mod tests {
@@ -319,6 +428,44 @@ mod tests {
         let b = build_storage_key(&user, "a.png");
         assert_ne!(a, b);
         assert!(a.starts_with(&format!("users/{user}/")));
+    }
+
+    #[test]
+    fn thumb_keys_are_derived_from_the_source_object() {
+        let key = "users/u123/aaaa-bbbb-dress.jpg";
+        // The extension is replaced, so the thumbnail keeps a valid image
+        // extension and stays a legal object path for `/files/*path`.
+        assert_eq!(thumb_storage_key(key, 480), "users/u123/aaaa-bbbb-dress.thumb480.jpg");
+        assert_eq!(thumb_storage_key(key, 96), "users/u123/aaaa-bbbb-dress.thumb96.jpg");
+        // A key with no extension to replace still gets a suffix.
+        assert_eq!(thumb_storage_key("users/u123/aaaa-bbbb-dress", 96), "users/u123/aaaa-bbbb-dress.thumb96.jpg");
+        // `/files` refuses to thumbnail an object that is already a thumbnail,
+        // which is what keeps these keys from nesting inside each other.
+        assert!(is_thumb_key(&thumb_storage_key(key, 480)));
+        assert!(!is_thumb_key(key));
+    }
+
+    #[test]
+    fn buckets_match_the_widths_the_ui_asks_for() {
+        // The wardrobe grid asks for exactly 480 (`ClothesView.vue:229`).
+        assert_eq!(thumbnail_bucket(480), Some(480));
+        // The picker and the clothes widget ask for 56 and 28.
+        assert_eq!(thumbnail_bucket(56), Some(96));
+        assert_eq!(thumbnail_bucket(28), Some(96));
+        // Nothing is upscaled just to satisfy a request: wider widths fall back
+        // to the original.
+        assert_eq!(thumbnail_bucket(481), None);
+        assert_eq!(thumbnail_bucket(1600), None);
+    }
+
+    #[test]
+    fn thumbs_are_only_generated_for_jpeg_bytes() {
+        assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        // A PNG (which `compress_image` may pass through untouched) gets nothing,
+        // so it keeps being served from the original instead of a flattened
+        // JPEG that would have dropped its transparency.
+        assert!(thumbs_from_stored(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x1A]).is_empty());
+        assert!(thumbs_from_stored(&[]).is_empty());
     }
 
     #[test]
