@@ -25,8 +25,8 @@ vi.mock('../../api/client', () => {
       listClothingItemsWithTotal: vi.fn().mockResolvedValue({ items: [a, b], total: null }),
       listOutfitsWithTotal: vi.fn().mockResolvedValue({
         items: [
-          { id: 'o-recent', date: daysAgoIso(2), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(2), items: [{ id: 'i1', name: 'Blue Shirt', image_path: null, color_id: 'blue' }] },
-          { id: 'o-old', date: daysAgoIso(200), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(200), items: [{ id: 'i2', name: 'Dark Jeans', image_path: null, color_id: null }] },
+          { id: 'o-recent', date: daysAgoIso(2), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(2), item_ids: ['i1'] },
+          { id: 'o-old', date: daysAgoIso(200), notes: null, image_path: null, is_active: true, created_at: daysAgoIso(200), item_ids: ['i2'] },
         ],
         total: null,
       }),

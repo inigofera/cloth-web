@@ -103,16 +103,46 @@ function readTotalCount(headers: Headers | null | undefined): number | null {
   return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
+/**
+ * Walk every page of a list endpoint. The server caps a single response at
+ * TABLE_ROWS_MAX_LIMIT rows but honours `limit`/`offset` and reports the size of
+ * the whole query in `X-Total-Count`, so paging here turns "the first 10k rows"
+ * into "all the rows" instead of a silently truncated head.
+ */
+const PAGE_LIMIT = 1_000;
+const MAX_PAGES = 50; // 50k rows: a runaway loop guard, not a data limit
+
+async function fetchAllPages(urlFor: (offset: number, limit: number) => string): Promise<{ items: unknown[]; total: number | null }> {
+  const acc: unknown[] = [];
+  let total: number | null = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const { data, headers } = await fetchWithHeaders(urlFor(acc.length, PAGE_LIMIT));
+    const rows = data as unknown[];
+    for (const row of rows) acc.push(row);
+
+    const reported = readTotalCount(headers);
+    if (reported != null) total = reported;
+    // A short page is the last page; a known total also ends the walk exactly.
+    if (rows.length < PAGE_LIMIT) break;
+    if (total != null && acc.length >= total) break;
+  }
+
+  return { items: acc, total };
+}
+
 async function listTableWithTotal<T>(table: string): Promise<{ items: T[]; total: number | null }> {
-  const { data, headers } = await fetchWithHeaders(
-    `${API_BASE}/db/${encodeURIComponent(table)}`
+  const { items, total } = await fetchAllPages(
+    (offset, limit) => `${API_BASE}/db/${encodeURIComponent(table)}?limit=${limit}&offset=${offset}`,
   );
-  return { items: data as T[], total: readTotalCount(headers) };
+  return { items: items as T[], total };
 }
 
 async function listOutfitsWithTotal(): Promise<{ items: Outfit[]; total: number | null }> {
-  const { data, headers } = await fetchWithHeaders(`${API_BASE}/outfits`);
-  return { items: data as Outfit[], total: readTotalCount(headers) };
+  const { items, total } = await fetchAllPages(
+    (offset, limit) => `${API_BASE}/outfits?limit=${limit}&offset=${offset}`,
+  );
+  return { items: items as Outfit[], total };
 }
 
 export const api = {

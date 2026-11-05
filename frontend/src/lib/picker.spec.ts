@@ -9,8 +9,8 @@ interface FakeItem {
 describe('buildLastWornMap', () => {
   it('records the most recent date key per item', () => {
     const map = buildLastWornMap([
-      { date: '2026-11-01', items: [{ id: 'a' }, { id: 'b' }] },
-      { date: '2026-11-03', items: [{ id: 'a' }] },
+      { date: '2026-11-01', item_ids: ['a', 'b'] },
+      { date: '2026-11-03', item_ids: ['a'] },
     ]);
     expect(map.get('a')).toBe('2026-11-03');
     expect(map.get('b')).toBe('2026-11-01');
@@ -18,9 +18,9 @@ describe('buildLastWornMap', () => {
 
   it('ignores outfits with unparseable dates', () => {
     const map = buildLastWornMap([
-      { date: 'not-a-date', items: [{ id: 'a' }] },
-      { date: '', items: [{ id: 'b' }] },
-      { date: '2026-11-04T08:30:00+09:00', items: [{ id: 'c' }] },
+      { date: 'not-a-date', item_ids: ['a'] },
+      { date: '', item_ids: ['b'] },
+      { date: '2026-11-04T08:30:00+09:00', item_ids: ['c'] },
     ]);
     expect(map.has('a')).toBe(false);
     expect(map.has('b')).toBe(false);
@@ -33,7 +33,7 @@ describe('buildLastWornMap', () => {
   });
 
   it('does not mutate the input array', () => {
-    const outfits = [{ date: '2026-11-04', items: [{ id: 'a' }] }];
+    const outfits = [{ date: '2026-11-04', item_ids: ['a'] }];
     buildLastWornMap(outfits);
     expect(outfits).toHaveLength(1);
   });

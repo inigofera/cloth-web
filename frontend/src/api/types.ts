@@ -98,14 +98,10 @@ export interface Brand {
   name: string;
 }
 
-export interface OutfitItem {
-  id: UUID;
-  name: string;
-  image_path: string | null;
-  color_id: string | null;
-  [key: string]: unknown;
-}
-
+// An outfit row carries the ids of its clothing items, not a copy of each row
+// (the server used to inline a full object per item: see routes.rs OUTFITS_ROW_EXPR,
+// which now emits `item_ids` ordered by item name). Consumers resolve ids
+// against the clothing-items snapshot they already hold.
 export interface Outfit {
   id: UUID;
   date: string;
@@ -113,7 +109,7 @@ export interface Outfit {
   image_path: string | null;
   is_active: boolean;
   created_at: string;
-  items: OutfitItem[];
+  item_ids: UUID[];
 }
 
 export interface CreateOutfitPayload {

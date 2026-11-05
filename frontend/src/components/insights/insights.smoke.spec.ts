@@ -58,11 +58,8 @@ vi.mock('../../api/client', () => ({
         image_path: null,
         is_active: true,
         created_at: new Date().toISOString(),
-        // Outfit items mirror the API's full clothing-items rows (incl. category ids).
-        items: [
-          { id: 'i1', name: 'Blue Shirt', category_id: 1, subcategory_id: 10, image_path: null, color_id: 'blue' },
-          { id: 'i2', name: 'Dark Jeans', category_id: 2, subcategory_id: 20, image_path: null, color_id: null },
-        ],
+        // The wire carries only item ids; the client joins them against the item rows.
+        item_ids: ['i1', 'i2'],
       },
     ], total: null }),
     listColors: vi.fn().mockResolvedValue([{ id: 'blue', hex_value: '#0000ff' }]),

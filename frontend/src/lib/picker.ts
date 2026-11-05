@@ -11,7 +11,7 @@ const DATE_KEY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 /** Minimal shape accepted by {@link buildLastWornMap}. */
 export interface LastWornSourceOutfit {
   date: string;
-  items: Array<{ id: string }>;
+  item_ids: string[];
 }
 
 /**
@@ -24,10 +24,10 @@ export function buildLastWornMap(outfits: readonly LastWornSourceOutfit[]): Map<
   for (const outfit of outfits) {
     const key = parseOutfitDateKey(outfit.date);
     if (!key) continue; // unparseable date: skip rather than guess
-    for (const item of outfit.items ?? []) {
-      const current = map.get(item.id);
+    for (const id of outfit.item_ids ?? []) {
+      const current = map.get(id);
       if (current === undefined || key > current) {
-        map.set(item.id, key);
+        map.set(id, key);
       }
     }
   }

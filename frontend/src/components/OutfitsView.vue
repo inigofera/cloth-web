@@ -130,10 +130,10 @@
               </div>
               <div class="outfit-items">
 
-                <span v-for="item in outfit.items" :key="item.id" class="item-tag">
-                  {{ item.name }}
+                <span v-for="itemId in outfit.item_ids" :key="itemId" class="item-tag">
+                  {{ getItemName(itemId) }}
                 </span>
-                <span v-if="outfit.items.length === 0" class="item-tag empty">no items</span>
+                <span v-if="outfit.item_ids.length === 0" class="item-tag empty">no items</span>
               </div>
               <p v-if="outfit.notes" class="outfit-notes">{{ outfit.notes }}</p>
 
@@ -902,7 +902,7 @@ function firstItemImage(outfit: Outfit, width: number): string | null {
     const url = imageUrl(outfit.image_path, { width });
     if (url) return url;
   }
-  for (const item of outfit.items) {
+  for (const item of wardrobe.itemsOf(outfit)) {
     const url = imageUrl(item.image_path, { width });
     if (url) return url;
   }
@@ -911,12 +911,18 @@ function firstItemImage(outfit: Outfit, width: number): string | null {
 
 function chipLabel(outfit: Outfit): string {
   if (outfit.notes) return outfit.notes;
-  if (outfit.items.length > 0) return outfit.items[0].name;
+  // The server orders `item_ids` by item name, so the first id is the same
+  // garment the joined payload used to lead with.
+  const firstId = outfit.item_ids[0];
+  if (firstId) {
+    const name = items.value.find(i => i.id === firstId)?.name;
+    if (name) return name;
+  }
   return 'Outfit';
 }
 
 function chipTitle(outfit: Outfit): string {
-  const itemNames = outfit.items.map(i => i.name).join(', ');
+  const itemNames = wardrobe.itemsOf(outfit).map(i => i.name).join(', ');
   return [outfit.notes, itemNames].filter(Boolean).join(' — ');
 }
 

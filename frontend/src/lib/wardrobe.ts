@@ -178,9 +178,9 @@ export function createWardrobeStore(client: WardrobeClient = api) {
   }
 
   /**
-   * Replace an item everywhere it is rendered. Outfit cards keep their own
-   * joined snapshot of the clothing row, so updating only `items` would leave
-   * stale names/photos in the outfits view.
+   * Replace an item everywhere it is rendered. Outfits now hold only clothing-
+   * item ids, so there is no joined copy of the row to keep in step: every
+   * consumer resolves the id against `items`, which we update here.
    */
   function replaceItem(item: ClothingItem): void {
     touch();
@@ -192,31 +192,11 @@ export function createWardrobeStore(client: WardrobeClient = api) {
       next[index] = item;
       items.value = next;
     }
-
-    outfits.value = outfits.value.map(outfit => {
-      if (!outfit.items.some(outfitItem => outfitItem.id === item.id)) return outfit;
-      return {
-        ...outfit,
-        items: outfit.items.map(outfitItem =>
-          outfitItem.id === item.id ? { ...outfitItem, ...item } : outfitItem,
-        ),
-      };
-    });
   }
 
   function patchItem(id: string, patch: Partial<ClothingItem>): void {
     touch();
     items.value = items.value.map(item => (item.id === id ? { ...item, ...patch } : item));
-
-    outfits.value = outfits.value.map(outfit => {
-      if (!outfit.items.some(outfitItem => outfitItem.id === id)) return outfit;
-      return {
-        ...outfit,
-        items: outfit.items.map(outfitItem =>
-          outfitItem.id === id ? { ...outfitItem, ...patch } : outfitItem,
-        ),
-      };
-    });
   }
 
   function removeItem(id: string): void {
@@ -226,10 +206,10 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     // The backend removes the item from every outfit it belonged to. Mirror
     // that locally so the outfits view stops showing a deleted item.
     outfits.value = outfits.value.map(outfit => {
-      if (!outfit.items.some(outfitItem => outfitItem.id === id)) return outfit;
+      if (!outfit.item_ids.some(outfitItemId => outfitItemId === id)) return outfit;
       return {
         ...outfit,
-        items: outfit.items.filter(outfitItem => outfitItem.id !== id),
+        item_ids: outfit.item_ids.filter(outfitItemId => outfitItemId !== id),
       };
     });
   }
@@ -238,8 +218,8 @@ export function createWardrobeStore(client: WardrobeClient = api) {
   // Outfits
   // ---------------------------------------------------------------------------
 
-  function adjustWearCounts(outfitItems: Array<{ id: string }>, delta: number): void {
-    const ids = new Set(outfitItems.map(item => item.id));
+  function adjustWearCounts(itemIds: string[], delta: number): void {
+    const ids = new Set(itemIds);
     if (ids.size === 0) return;
 
     items.value = items.value.map(item =>
@@ -249,20 +229,37 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     );
   }
 
+  /**
+   * Resolve an outfit's item ids against the current clothing-item snapshot.
+   * One lookup pass per outfit, sharing the reactive item objects rather than
+   * copying rows, so renaming or re-photoing an item needs no outfit update.
+   * Ids whose item no longer exists are dropped (the backend prunes them too).
+   */
+  function itemsOf(outfit: Outfit): ClothingItem[] {
+    if (!outfit.item_ids || outfit.item_ids.length === 0) return [];
+    if (outfit.item_ids.length === 1) {
+      const single = items.value.find(item => item.id === outfit.item_ids[0]);
+      return single ? [single] : [];
+    }
+
+    const byId = new Map<string, ClothingItem>(items.value.map(item => [item.id, item]));
+    return outfit.item_ids.map(id => byId.get(id)).filter((item) => item != null);
+  }
+
   function addOutfit(outfit: Outfit): void {
     touch();
     outfits.value = [...outfits.value.filter(existing => existing.id !== outfit.id), outfit].sort(
       (a, b) => a.date.localeCompare(b.date),
     );
     // The server increments wear counts when an outfit is created.
-    adjustWearCounts(outfit.items, 1);
+    adjustWearCounts(outfit.item_ids, 1);
   }
 
   function removeOutfit(outfit: Outfit): void {
     touch();
     outfits.value = outfits.value.filter(existing => existing.id !== outfit.id);
     // The server decrements wear counts when an outfit is deleted.
-    adjustWearCounts(outfit.items, -1);
+    adjustWearCounts(outfit.item_ids, -1);
   }
 
   // ---------------------------------------------------------------------------
@@ -319,6 +316,7 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     removeItem,
     addOutfit,
     removeOutfit,
+    itemsOf,
     addColor,
     addCategory,
     addSubcategory,

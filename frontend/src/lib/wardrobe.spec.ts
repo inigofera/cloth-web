@@ -33,12 +33,7 @@ function outfit(id: string, date: string, itemIds: string[]): Outfit {
     image_path: null,
     is_active: true,
     created_at: '2024-01-01T00:00:00Z',
-    items: itemIds.map(itemId => ({
-      id: itemId,
-      name: `Item ${itemId}`,
-      image_path: null,
-      color_id: null,
-    })),
+    item_ids: itemIds,
   };
 }
 
@@ -83,27 +78,28 @@ describe('wardrobe store', () => {
     expect(store.brands.value).toHaveLength(1);
   });
 
-  it('keeps outfit snapshots in sync when an item changes or is deleted', async () => {
+  it('keeps outfit references in sync when an item changes or is deleted', async () => {
     const store = createWardrobeStore(makeClient());
     await store.load();
 
     store.replaceItem(clothingItem('i1', { name: 'Renamed Shirt', image_path: 'users/u/new.jpg' }));
 
     const stored = store.items.value.find(item => item.id === 'i1');
-    const snapshot = store.outfits.value[0].items.find(item => item.id === 'i1');
     expect(stored?.name).toBe('Renamed Shirt');
-    expect(snapshot?.name).toBe('Renamed Shirt');
-    expect(snapshot?.image_path).toBe('users/u/new.jpg');
+    // Outfits carry ids only, so the edit is visible through resolution and
+    // needs no joined copy of the row to be patched.
+    const joined = store.itemsOf(store.outfits.value[0]);
+    expect(joined.some(item => item.id === 'i1')).toBe(true);
+    expect(joined.find(item => item.id === 'i1')?.image_path).toBe('users/u/new.jpg');
 
     store.patchItem('i1', { is_active: false });
     expect(store.items.value.find(item => item.id === 'i1')?.is_active).toBe(false);
-    expect(store.outfits.value[0].items.find(item => item.id === 'i1')?.is_active).toBe(false);
 
     store.removeItem('i1');
     expect(store.items.value.some(item => item.id === 'i1')).toBe(false);
-    expect(store.outfits.value[0].items.some(item => item.id === 'i1')).toBe(false);
+    expect(store.outfits.value[0].item_ids.some(id => id === 'i1')).toBe(false);
     // The rest of the outfit is untouched.
-    expect(store.outfits.value[0].items.map(item => item.id)).toEqual(['i2']);
+    expect(store.outfits.value[0].item_ids).toEqual(['i2']);
   });
 
   it('adjusts wear counts when outfits are added or removed', async () => {
