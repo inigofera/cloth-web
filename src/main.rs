@@ -5,6 +5,7 @@ mod db;
 mod storage;
 mod upload;
 mod routes;
+mod cache;
 
 use axum::{Router, routing::{get, post}, extract::DefaultBodyLimit};
 use axum::serve;
@@ -24,6 +25,10 @@ use routes::{
 pub struct AppState {
     pub db: sqlx::Pool<sqlx::Postgres>,
     pub storage: SupabaseStorage,
+    pub image_cache: Arc<cache::ImageCache>,
+    // The shape of the public schema, read once at startup: the CRUD endpoints answer their
+    // table questions from here rather than from information_schema per request.
+    pub schema: Arc<db::SchemaCache>,
     pub jwt_secret: String,
     pub encryption_key: [u8; 32],
 }
@@ -83,9 +88,16 @@ async fn main() {
         }
     });
 
+    // Warm the schema snapshot before the first request can arrive: one statement reads the
+    // shape of every public table, and the CRUD endpoints never pay that read themselves.
+    let schema = Arc::new(db::SchemaCache::new());
+    schema.refresh(&db).await;
+
     let state = Arc::new(AppState {
         db,
         storage,
+        image_cache: Arc::new(cache::ImageCache::new(512, 24 * 1024 * 1024)),
+        schema: schema,
         jwt_secret,
         encryption_key,
     });
