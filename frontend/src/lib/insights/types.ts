@@ -146,4 +146,20 @@ export const DEFAULT_FILTERS: GlobalFilters = {
 export interface FilteredData {
   items: EnrichedItem[];
   outfits: EnrichedOutfit[];
+  /**
+   * Precomputed once per filtered dataset (metrics.withDerived) and shared with
+   * every widget: the wear / last-worn maps are the same for all of them, and
+   * the four range buckets replace a per-widget copy of all outfits. Both are
+   * optional so hand-built fixtures in specs and tests keep working; metrics
+   * falls back to computing them locally when they are missing.
+   */
+  derived?: DerivedStats;
+  buckets?: Record<WidgetRange, FilteredData>;
+}
+
+/** Shared per-dataset views built by metrics.withDerived. */
+export interface DerivedStats {
+  wearMap: Map<string, number>;
+  lastWornMap: Map<string, string>;
+  totalWears: number;
 }

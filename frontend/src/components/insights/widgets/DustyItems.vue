@@ -48,7 +48,10 @@ const rows = computed(() =>
     includeNeverWorn: includeNeverWorn.value,
     sortBy: sortBy.value,
     fullData: props.data,
-  }).slice(0, topN.value),
+    // The widget shows a fixed number of rows, so the ranking stops at that
+    // many instead of sorting every dusty item.
+    limit: topN.value,
+  }),
 );
 
 const barMax = computed(() => Math.max(90, threshold.value * 2));

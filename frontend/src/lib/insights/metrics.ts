@@ -68,12 +68,12 @@ function resolveRange(f: GlobalFilters): { from: string | null; to: string | nul
 
 /** Narrow a filtered dataset to a per-widget date range (intersects the global filter). */
 export function rangeData(data: FilteredData, preset: WidgetRange): FilteredData {
+  // A dataset built by withDerived already holds the four range views, so this
+  // is a look-up, not a fresh filter + spread copy per widget.
+  const bucket = data.buckets?.[preset];
+  if (bucket) return bucket;
   if (preset === 'all') return data;
-  const { from, to } = presetRange(preset);
-  return {
-    ...data,
-    outfits: data.outfits.filter(o => (from == null || o.dateKey >= from) && (to == null || o.dateKey <= to)),
-  };
+  return bucketFor(data, preset);
 }
 
 /** Read a per-widget range value from a widget config. */
@@ -119,7 +119,13 @@ export function filterItemsByCategory(
   const match = (i: EnrichedItem) =>
     (categoryId == null || i.category_id === categoryId) &&
     (subcategoryId == null || i.subcategory_id === subcategoryId);
-  return { ...data, items: data.items.filter(match) };
+  return {
+    ...data,
+    items: data.items.filter(match),
+    // The range buckets would still hold the un-narrowed item list, so a
+    // category-restricted view rebuilds its bucket on demand instead.
+    buckets: undefined,
+  };
 }
 
 /**
@@ -142,6 +148,83 @@ export function applyFilters(ds: InsightDataset, f: GlobalFilters): FilteredData
     .filter(o => o.items.length > 0);
 
   return { items, outfits };
+}
+
+// ---------------------------------------------------------------------------
+// Shared derived views
+// ---------------------------------------------------------------------------
+
+/**
+ * One pass over the outfit->item edges yields everything every widget needs.
+ * The edges themselves are the data (outfits are the join's second look), so
+ * rebuilding them per widget was the dominant cost: ~20 widgets each walked all
+ * edges to build the same two maps. This runs once per filtered dataset and the
+ * maps ride along on FilteredData.
+ */
+export interface DerivedStats {
+  wearMap: Map<string, number>;
+  lastWornMap: Map<string, string>;
+  totalWears: number;
+}
+
+export function computeDerived(outfits: readonly EnrichedOutfit[]): DerivedStats {
+  const wearMap = new Map<string, number>();
+  const lastWorn = new Map<string, string>();
+  let totalWears = 0;
+  for (const o of outfits) {
+    for (const i of o.items) {
+      wearMap.set(i.id, (wearMap.get(i.id) ?? 0) + 1);
+      totalWears++;
+      const prev = lastWorn.get(i.id);
+      if (prev == null || o.dateKey > prev) lastWorn.set(i.id, o.dateKey);
+    }
+  }
+  return { wearMap, lastWornMap: lastWorn, totalWears };
+}
+
+/** Read the precomputed wear map, or build one for a hand-made dataset. */
+function wearMapOf(data: FilteredData): Map<string, number> {
+  return data.derived?.wearMap ?? outfitWearMap(data);
+}
+
+/** Read the precomputed last-worn map, or build one for a hand-made dataset. */
+function lastWornOf(data: FilteredData): Map<string, string> {
+  return data.derived?.lastWornMap ?? lastWornMap(data);
+}
+
+/**
+ * Narrow a dataset to one per-widget range. The derived views are rebuilt for
+ * the narrowed outfit list, never inherited from the parent: a widget's wear
+ * counts mean "wears inside its window", and a parent's maps would silently
+ * carry wears from outside it.
+ */
+function bucketFor(data: FilteredData, preset: WidgetRange): FilteredData {
+  if (preset === 'all') return { ...data, derived: data.derived ?? computeDerived(data.outfits) };
+  const { from, to } = presetRange(preset);
+  const outfits = data.outfits.filter(o => (from == null || o.dateKey >= from) && (to == null || o.dateKey <= to));
+  return { ...data, derived: computeDerived(outfits), outfits };
+}
+
+/**
+ * Attach the shared views plus the four range buckets to a filtered dataset, so
+ * each widget gets a ready-made view instead of copying all outfits itself.
+ * The buckets cost one pass each, replacing a per-widget rebuild: ~20 widgets
+ * reading the same bucket instead of 20 walks of the same edges.
+ * Returns a fresh object: the buckets hold new outfit arrays, never mutated
+ * after this point.
+ */
+export function withDerived(data: FilteredData): FilteredData {
+  const derived = computeDerived(data.outfits);
+  return {
+    ...data,
+    derived,
+    buckets: {
+      all: { ...data, derived },
+      '30d': bucketFor(data, '30d'),
+      '90d': bucketFor(data, '90d'),
+      '1y': bucketFor(data, '1y'),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -213,13 +296,13 @@ export function computeStat(
     case 'total_outfits':
       return { value: data.outfits.length, format: 'int' };
     case 'total_wears': {
-      const wearMap = outfitWearMap(data);
+      const wearMap = wearMapOf(data);
       return { value: data.items.reduce((a, i) => a + itemWears(i, wearMap), 0), format: 'int' };
     }
     case 'never_worn': {
       // Wear history comes from the full (un-narrowed) dataset so a period
       // window doesn't make items worn outside it look never-worn.
-      const wearMap = outfitWearMap(opts.fullData ?? data);
+      const wearMap = wearMapOf(opts.fullData ?? data);
       return { value: data.items.filter(i => (wearMap.get(i.id) ?? 0) === 0).length, format: 'int' };
     }
     case 'dusty':
@@ -234,7 +317,7 @@ export function computeStat(
       return { value: prices.reduce((a, b) => a + b, 0) / prices.length, format: 'price' };
     }
     case 'cost_per_wear': {
-      const wearMap = outfitWearMap(data);
+      const wearMap = wearMapOf(data);
       const priced = data.items.filter(i => i.purchase_price != null);
       const spend = priced.reduce((a, i) => a + (i.purchase_price ?? 0), 0);
       const wears = priced.reduce((a, i) => a + itemWears(i, wearMap), 0);
@@ -339,6 +422,47 @@ export interface RankedItem {
   rate: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Bounded ranking
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep the best `n` rows without sorting the rest. Every ranking in this module
+ * is a top-N view of a long list, and a full sort costs O(m log m) comparisons
+ * plus the allocation of the whole array; this costs one pass plus an
+ * insertion into an array that never exceeds n. Insertion is on the far side of
+ * equal rows, so ties keep their input order exactly as Array.sort's stability
+ * did, and the row dropped when over capacity is the later one — the result is
+ * identical to a stable sort followed by slice(0, n).
+ */
+export type Compare<T> = (a: T, b: T) => number;
+
+export function topN<T>(rows: readonly T[], n: number, better: Compare<T>): T[] {
+  if (n <= 0) return [];
+  const best: T[] = [];
+  for (const row of rows) {
+    let lo = 0;
+    let hi = best.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (better(row, best[mid]) < 0) hi = mid;
+      else lo = mid + 1;
+    }
+    best.splice(lo, 0, row);
+    if (best.length > n) best.pop();
+  }
+  return best;
+}
+
+/** The earliest outfit date key, found by walking once instead of sorting. */
+function oldestKeyOf(outfits: readonly EnrichedOutfit[]): string | null {
+  let oldest: string | null = null;
+  for (const o of outfits) {
+    if (oldest == null || o.dateKey < oldest) oldest = o.dateKey;
+  }
+  return oldest;
+}
+
 export type TopWornMetric = 'total' | 'per_month';
 
 export function topWorn(
@@ -349,11 +473,11 @@ export function topWorn(
 ): RankedItem[] {
   const metric = opts.metric ?? 'total';
   const minWears = opts.minWears ?? 0;
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   // Ownership-duration fallback uses the full (un-narrowed) dataset so a short
   // period window doesn't inflate wears-per-month rates.
   const history = opts.fullData ?? data;
-  const oldestOutfit = history.outfits.length > 0 ? [...history.outfits.map(o => o.dateKey)].sort()[0] : null;
+  const oldestOutfit = oldestKeyOf(history.outfits);
   const now = todayKey();
   const monthsOwned = (i: EnrichedItem): number => {
     const src = i.owned_since ?? (i.created_at ? i.created_at.slice(0, 10) : null) ?? oldestOutfit;
@@ -361,24 +485,27 @@ export function topWorn(
     const days = Math.max(0, daysBetween(src.slice(0, 10), now));
     return Math.max(1, days / 30.44);
   };
-  return data.items
-    .map(i => {
-      const count = source === 'outfits' ? (wearMap.get(i.id) ?? 0) : (i.wear_count ?? 0);
-      return {
-        id: i.id,
-        name: i.name,
-        image_path: i.image_path,
-        count,
-        rate: metric === 'per_month' ? count / monthsOwned(i) : null,
-      };
-    })
-    .filter(i => i.count > 0 && i.count >= minWears)
-    .sort(
-      (a, b) =>
-        (metric === 'per_month' ? (b.rate ?? 0) - (a.rate ?? 0) : b.count - a.count) ||
-        a.name.localeCompare(b.name),
-    )
-    .slice(0, n);
+
+  // One pass builds the candidates; only the top n of them are ever kept.
+  const rows: RankedItem[] = [];
+  for (const i of data.items) {
+    const count = source === 'outfits' ? (wearMap.get(i.id) ?? 0) : (i.wear_count ?? 0);
+    if (count <= 0 || count < minWears) continue;
+    rows.push({
+      id: i.id,
+      name: i.name,
+      image_path: i.image_path,
+      count,
+      rate: metric === 'per_month' ? count / monthsOwned(i) : null,
+    });
+  }
+  return topN(
+    rows,
+    n,
+    (a, b) =>
+      (metric === 'per_month' ? (b.rate ?? 0) - (a.rate ?? 0) : b.count - a.count) ||
+      a.name.localeCompare(b.name),
+  );
 }
 
 export interface DustyItem {
@@ -396,6 +523,12 @@ export interface DustyOptions {
   includeNeverWorn?: boolean;
   sortBy?: 'days' | 'price' | 'recent';
   /**
+   * Keep only the first `limit` dusty items in sort order. Callers that show a
+   * short list pass their row count, which stops a full sort of the whole
+   * matching set.
+   */
+  limit?: number;
+  /**
    * Dataset (typically not period-narrowed) used to determine last-worn dates,
    * so items worn outside the period aren't reported as never worn.
    */
@@ -405,7 +538,7 @@ export interface DustyOptions {
 export function dustyItems(data: FilteredData, thresholdDays: number, opts: DustyOptions = {}): DustyItem[] {
   const includeNeverWorn = opts.includeNeverWorn ?? true;
   const sortBy = opts.sortBy ?? 'days';
-  const lastWorn = lastWornMap(opts.fullData ?? data);
+  const lastWorn = lastWornOf(opts.fullData ?? data);
   const today = todayKey();
   const rows: DustyItem[] = [];
   for (const i of data.items) {
@@ -422,11 +555,14 @@ export function dustyItems(data: FilteredData, thresholdDays: number, opts: Dust
       });
     }
   }
-  rows.sort((a, b) => {
+  const compare = (a: DustyItem, b: DustyItem): number => {
     if (sortBy === 'price') return (b.price ?? -1) - (a.price ?? -1) || a.name.localeCompare(b.name);
     if (sortBy === 'recent') return (b.owned ?? '').localeCompare(a.owned ?? '') || a.name.localeCompare(b.name);
     return a.daysSince == null ? -1 : b.daysSince == null ? 1 : b.daysSince - a.daysSince;
-  });
+  };
+  const limit = opts.limit ?? 0;
+  if (limit > 0) return topN(rows, limit, compare);
+  rows.sort(compare);
   return rows;
 }
 
@@ -613,7 +749,7 @@ export function priceHistogram(data: FilteredData, bucketCount: number): TrendPo
     buckets[idx]++;
   }
   return buckets.map((value, idx) => ({
-    label: `${Math.round(min + idx * width)}–${Math.round(min + (idx + 1) * width)}`,
+    label: `${Math.round(min + idx * width)}â€“${Math.round(min + (idx + 1) * width)}`,
     value,
   }));
 }
@@ -707,7 +843,7 @@ export function costPerWear(
 ): CpwEntry[] {
   const source = opts.source ?? 'best';
   const minWears = opts.minWears ?? 0;
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   const rows = data.items
     .filter(i => i.purchase_price != null && i.purchase_price > 0)
     .map(i => {
@@ -723,8 +859,7 @@ export function costPerWear(
       };
     })
     .filter(r => Number.isFinite(r.cpw) && r.wears >= minWears);
-  rows.sort(direction === 'best' ? (a, b) => a.cpw - b.cpw : (a, b) => b.cpw - a.cpw);
-  return rows.slice(0, n);
+  return topN(rows, n, direction === 'best' ? (a, b) => a.cpw - b.cpw : (a, b) => b.cpw - a.cpw);
 }
 
 export interface CpwDetail {
@@ -744,7 +879,7 @@ export interface CpwDetail {
 
 /** Wardrobe-wide average cost per wear (total spend / total wears over priced items). */
 export function wardrobeCpwAverage(data: FilteredData, source: CpwSource = 'best'): number | null {
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   const priced = data.items.filter(i => i.purchase_price != null && i.purchase_price > 0);
   if (priced.length === 0) return null;
   const spend = priced.reduce((a, i) => a + (i.purchase_price ?? 0), 0);
@@ -755,7 +890,7 @@ export function wardrobeCpwAverage(data: FilteredData, source: CpwSource = 'best
 /** Cost-per-wear detail for a single focused item, with wardrobe context. */
 export function cpwDetail(data: FilteredData, itemId: string, opts: CpwOptions = {}): CpwDetail | null {
   const source = opts.source ?? 'best';
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   const item = data.items.find(i => i.id === itemId);
   if (!item || item.purchase_price == null) return null;
   const wears = wearsOf(item, wearMap, source);
@@ -800,7 +935,7 @@ export function expensiveDusty(
   opts: { sortBy?: ExpensiveDustySort; topN?: number } = {},
 ): ExpensiveDustyEntry[] {
   const sortBy = opts.sortBy ?? 'price';
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   const rows = data.items
     .filter(i => (i.purchase_price ?? 0) >= minPrice && itemWears(i, wearMap) <= maxWears)
     .map(i => ({
@@ -810,7 +945,7 @@ export function expensiveDusty(
       price: i.purchase_price ?? 0,
       wears: itemWears(i, wearMap),
     }));
-  rows.sort((a, b) => {
+  const compare = (a: ExpensiveDustyEntry, b: ExpensiveDustyEntry): number => {
     if (sortBy === 'wears') return a.wears - b.wears || b.price - a.price;
     if (sortBy === 'cpw') {
       const av = a.wears > 0 ? a.price / a.wears : Number.POSITIVE_INFINITY;
@@ -818,9 +953,11 @@ export function expensiveDusty(
       return bv - av || b.price - a.price;
     }
     return b.price - a.price;
-  });
+  };
   const n = opts.topN;
-  return n != null && n > 0 ? rows.slice(0, n) : rows;
+  if (n != null && n > 0) return topN(rows, n, compare);
+  rows.sort(compare);
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +998,7 @@ export function impactHotspots(
   opts: { includeMedium?: boolean; minWears?: number } = {},
 ): ImpactEntry[] {
   const minWears = opts.minWears ?? 0;
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   return data.items
     .filter(i => {
       if (i.laundry_impact == null) return false;
@@ -988,7 +1125,7 @@ export function textInsights(data: FilteredData): TextInsight[] {
   }
 
   const out: TextInsight[] = [];
-  const wearMap = outfitWearMap(data);
+  const wearMap = wearMapOf(data);
   const totalWears = [...wearMap.values()].reduce((a, b) => a + b, 0);
 
   const neverWorn = items.filter(i => (wearMap.get(i.id) ?? 0) === 0).length;

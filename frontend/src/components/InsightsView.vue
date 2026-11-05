@@ -64,7 +64,7 @@ import FilterBar from './insights/FilterBar.vue';
 import WidgetGrid from './insights/WidgetGrid.vue';
 import WidgetPalette from './insights/WidgetPalette.vue';
 import { WIDGET_CATALOG } from '../lib/insights/catalog';
-import { applyFilters } from '../lib/insights/metrics';
+import { applyFilters, withDerived } from '../lib/insights/metrics';
 import { createInstance, defaultLayout, loadLayout, saveLayout } from '../lib/insights/store';
 import { parseOutfitDateKey } from '../lib/dates';
 import {
@@ -109,8 +109,11 @@ const widgets = ref<WidgetInstance[]>(loadLayout(WIDGET_CATALOG));
 
 watch(widgets, () => saveLayout(widgets.value), { deep: true });
 
+// One derived pass per filtered dataset: the wear and last-worn maps plus the
+// four range views ride along on this object, so the ~20 widgets read shared
+// views instead of each rebuilding (and re-copying) the same data.
 const filteredData = computed<FilteredData>(() =>
-  dataset.value ? applyFilters(dataset.value, filters.value) : { items: [], outfits: [] },
+  dataset.value ? withDerived(applyFilters(dataset.value, filters.value)) : { items: [], outfits: [] },
 );
 
 // Derived from the server-reported totals (X-Total-Count). Replaces the old
@@ -246,12 +249,31 @@ function buildDataset(
   };
 
   const items = rawItems.map(enrich);
+
+  // Items are nodes, outfits are edges: the wire carries only ids, so each item
+  // is enriched exactly once and the SAME object is shared by every outfit that
+  // wears it. A garment seen in fifty outfits used to cost fifty copies of a
+  // fifteen-field record; now it costs one record plus fifty references.
+  const enrichedById = new Map<string, EnrichedItem>(items.map(item => [item.id, item]));
+
+  const joinOutfitItems = (itemIds: string[] | undefined): EnrichedItem[] => {
+    if (!itemIds || itemIds.length === 0) return [];
+    const joined: EnrichedItem[] = [];
+    for (const id of itemIds) {
+      const item = enrichedById.get(id);
+      // An id whose item row never arrived is skipped: metrics would otherwise
+      // carry a phantom garment through every aggregation.
+      if (item) joined.push(item);
+    }
+    return joined;
+  };
+
   const outfits: EnrichedOutfit[] = rawOutfits.map(o => ({
     id: o.id,
     date: o.date,
     dateKey: parseOutfitDateKey(o.date),
     notes: o.notes,
-    items: o.items.map(enrich),
+    items: joinOutfitItems(o.item_ids),
   }));
 
   return { items, outfits, colors: colorMap, categories: catMap, subcategories: subMap, brands: brandMap };
