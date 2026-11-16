@@ -77,7 +77,11 @@ pub fn sanitize_filename(raw: &str) -> Result<String, UploadError> {
         .take(MAX_NAME_LEN)
         .collect();
 
-    let name = if cleaned.is_empty() { "image".to_string() } else { cleaned };
+    let name = if cleaned.is_empty() {
+        "image".to_string()
+    } else {
+        cleaned
+    };
 
     Ok(format!("{name}.{ext}"))
 }
@@ -191,7 +195,9 @@ pub fn apply_orientation(img: image::RgbaImage, orientation: u16) -> image::Rgba
 /// Normalizes an image: decodes raw bytes, applies EXIF orientation,
 /// downscales to max 1600px with Lanczos3, and encodes to JPEG at quality 80.
 #[allow(dead_code)]
-pub fn process_and_encode_image(raw_bytes: &[u8]) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
+pub fn process_and_encode_image(
+    raw_bytes: &[u8],
+) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
     process_and_encode_image_matching_aspect(raw_bytes, 0, 0)
 }
 
@@ -266,8 +272,12 @@ pub fn process_and_encode_image_matching_aspect(
     target_w: u32,
     target_h: u32,
 ) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
-    let img = image::load_from_memory(raw_bytes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("failed to decode image: {e}")))?;
+    let img = image::load_from_memory(raw_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("failed to decode image: {e}"),
+        )
+    })?;
 
     let oriented = apply_orientation(img.to_rgba8(), exif_orientation(raw_bytes));
     let cropped = crop_to_aspect_ratio(oriented, target_w, target_h);
@@ -295,7 +305,12 @@ pub fn process_and_encode_image_matching_aspect(
             rgb.height(),
             image::ExtendedColorType::Rgb8,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to encode jpeg: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to encode jpeg: {e}"),
+            )
+        })?;
 
     Ok((out, "image/jpeg"))
 }
@@ -310,8 +325,7 @@ pub fn encode_thumbnail(img: &image::RgbaImage, width: u32) -> Option<Vec<u8>> {
     }
     let scale = width as f64 / w as f64;
     let new_h = (h as f64 * scale).round().max(1.0) as u32;
-    let small =
-        image::imageops::resize(img, width, new_h, image::imageops::FilterType::Lanczos3);
+    let small = image::imageops::resize(img, width, new_h, image::imageops::FilterType::Lanczos3);
     let rgb = image::DynamicImage::ImageRgba8(small).to_rgb8();
     let mut out = Vec::new();
     let encoded = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY)
@@ -326,7 +340,7 @@ pub fn encode_thumbnail(img: &image::RgbaImage, width: u32) -> Option<Vec<u8>> {
         false => {
             eprintln!("thumbnail encode failed for {width}px image");
             None
-        },
+        }
         true => Some(out),
     }
 }
@@ -348,12 +362,12 @@ pub fn thumbs_from_stored(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
                 let mut thumbs: Vec<(u32, Vec<u8>)> = Vec::new();
                 for width in THUMB_WIDTHS {
                     match encode_thumbnail(&decoded, width) {
-                        None => {},
+                        None => {}
                         Some(body) => thumbs.push((width, body)),
                     };
-                };
+                }
                 thumbs
-            },
+            }
         },
     }
 }
@@ -377,7 +391,10 @@ mod tests {
 
     #[test]
     fn replaces_unsafe_characters() {
-        assert_eq!(sanitize_filename("my photo (1).png").unwrap(), "my_photo__1_.png");
+        assert_eq!(
+            sanitize_filename("my photo (1).png").unwrap(),
+            "my_photo__1_.png"
+        );
         assert_eq!(sanitize_filename("a\"b'c.png").unwrap(), "a_b_c.png");
     }
 
@@ -435,10 +452,19 @@ mod tests {
         let key = "users/u123/aaaa-bbbb-dress.jpg";
         // The extension is replaced, so the thumbnail keeps a valid image
         // extension and stays a legal object path for `/files/*path`.
-        assert_eq!(thumb_storage_key(key, 480), "users/u123/aaaa-bbbb-dress.thumb480.jpg");
-        assert_eq!(thumb_storage_key(key, 96), "users/u123/aaaa-bbbb-dress.thumb96.jpg");
+        assert_eq!(
+            thumb_storage_key(key, 480),
+            "users/u123/aaaa-bbbb-dress.thumb480.jpg"
+        );
+        assert_eq!(
+            thumb_storage_key(key, 96),
+            "users/u123/aaaa-bbbb-dress.thumb96.jpg"
+        );
         // A key with no extension to replace still gets a suffix.
-        assert_eq!(thumb_storage_key("users/u123/aaaa-bbbb-dress", 96), "users/u123/aaaa-bbbb-dress.thumb96.jpg");
+        assert_eq!(
+            thumb_storage_key("users/u123/aaaa-bbbb-dress", 96),
+            "users/u123/aaaa-bbbb-dress.thumb96.jpg"
+        );
         // `/files` refuses to thumbnail an object that is already a thumbnail,
         // which is what keeps these keys from nesting inside each other.
         assert!(is_thumb_key(&thumb_storage_key(key, 480)));
@@ -483,7 +509,7 @@ mod tests {
     #[test]
     fn test_crop_to_aspect_ratio() {
         let img = image::RgbaImage::new(1000, 1000); // 1:1
-        // Crop to 3:4 target (width should become 750, height stays 1000)
+                                                     // Crop to 3:4 target (width should become 750, height stays 1000)
         let cropped = crop_to_aspect_ratio(img.clone(), 3, 4);
         assert_eq!(cropped.dimensions(), (750, 1000));
 

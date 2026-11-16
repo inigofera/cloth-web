@@ -45,10 +45,12 @@ pub mod tests {
         let key = [0x42u8; 32];
         let original = "AIzaSyFakeApiKey1234567890";
 
-        let (ciphertext, nonce) = encrypt_api_key(original, &key).expect("encryption should succeed");
+        let (ciphertext, nonce) =
+            encrypt_api_key(original, &key).expect("encryption should succeed");
         assert_ne!(ciphertext, original.as_bytes());
 
-        let decrypted = decrypt_api_key(&ciphertext, &nonce, &key).expect("decryption should succeed");
+        let decrypted =
+            decrypt_api_key(&ciphertext, &nonce, &key).expect("decryption should succeed");
         assert_eq!(decrypted, original);
     }
 
@@ -58,7 +60,8 @@ pub mod tests {
         let key2 = [0x43u8; 32];
         let original = "AIzaSyFakeApiKey1234567890";
 
-        let (ciphertext, nonce) = encrypt_api_key(original, &key1).expect("encryption should succeed");
+        let (ciphertext, nonce) =
+            encrypt_api_key(original, &key1).expect("encryption should succeed");
         let result = decrypt_api_key(&ciphertext, &nonce, &key2);
 
         assert!(result.is_err(), "decryption with wrong key must fail");
@@ -69,10 +72,15 @@ pub mod tests {
         let key = [0x42u8; 32];
         let original = "AIzaSyFakeApiKey1234567890";
 
-        let (ciphertext1, nonce1) = encrypt_api_key(original, &key).expect("encryption 1 should succeed");
-        let (ciphertext2, nonce2) = encrypt_api_key(original, &key).expect("encryption 2 should succeed");
+        let (ciphertext1, nonce1) =
+            encrypt_api_key(original, &key).expect("encryption 1 should succeed");
+        let (ciphertext2, nonce2) =
+            encrypt_api_key(original, &key).expect("encryption 2 should succeed");
 
         assert_ne!(nonce1, nonce2, "nonces must be unique per encryption");
-        assert_ne!(ciphertext1, ciphertext2, "ciphertexts must differ due to unique nonces");
+        assert_ne!(
+            ciphertext1, ciphertext2,
+            "ciphertexts must differ due to unique nonces"
+        );
     }
 }

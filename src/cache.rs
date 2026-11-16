@@ -63,7 +63,10 @@ impl ImageCache {
 
     /// Return the cached response for `key`, marking it as most recently used.
     pub fn get(&self, key: &str) -> Option<CachedImage> {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tick = state.tick + 1;
         state.tick = tick;
 
@@ -75,14 +78,17 @@ impl ImageCache {
                     body: slot.body.clone(),
                     content_type: slot.content_type.clone(),
                 })
-            },
+            }
         }
     }
 
     /// Store a response, then drop least-recently-used entries until both the
     /// entry count and the byte budget fit again.
     pub fn put(&self, key: &str, image: CachedImage) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let size = image.body.len();
 
         // Bigger than the whole budget: keeping it would mean dropping it
@@ -95,19 +101,24 @@ impl ImageCache {
         // new one, so `stored_bytes` cannot drift when a URL is served twice.
         let mut displaced = 0;
         match state.entries.remove(key) {
-            None => {},
-            Some(old) => { displaced = old.size; },
+            None => {}
+            Some(old) => {
+                displaced = old.size;
+            }
         };
         state.stored_bytes = state.stored_bytes - displaced;
 
         let tick = state.tick + 1;
         state.tick = tick;
-        state.entries.insert(key.to_string(), CacheSlot {
-            body: image.body,
-            content_type: image.content_type,
-            used: tick,
-            size: size,
-        });
+        state.entries.insert(
+            key.to_string(),
+            CacheSlot {
+                body: image.body,
+                content_type: image.content_type,
+                used: tick,
+                size: size,
+            },
+        );
         state.stored_bytes = state.stored_bytes + size;
 
         while state.entries.len() > self.capacity || state.stored_bytes > self.max_bytes {
@@ -127,11 +138,13 @@ impl ImageCache {
                 Some(victim) => {
                     let mut evicted = 0;
                     match state.entries.remove(&victim) {
-                        None => {},
-                        Some(old) => { evicted = old.size; },
+                        None => {}
+                        Some(old) => {
+                            evicted = old.size;
+                        }
                     };
                     state.stored_bytes = state.stored_bytes - evicted;
-                },
+                }
             };
         }
     }
@@ -144,10 +157,13 @@ mod tests {
     #[test]
     fn hits_and_misses_are_keyed_exactly() {
         let cache = ImageCache::new(4, 1024);
-        cache.put("users/u/a.jpg?width=480", CachedImage {
-            body: vec![1u8, 2u8],
-            content_type: "image/jpeg".to_string(),
-        });
+        cache.put(
+            "users/u/a.jpg?width=480",
+            CachedImage {
+                body: vec![1u8, 2u8],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
 
         let hit = cache.get("users/u/a.jpg?width=480");
         assert!(hit.is_some());
@@ -172,7 +188,10 @@ mod tests {
             );
         }
 
-        let state = cache.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = cache
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(state.entries.len() <= 2);
         // The byte budget is the binding one here: two 40-byte slots fit, three
         // would not.
@@ -182,30 +201,54 @@ mod tests {
     #[test]
     fn oversize_responses_are_skipped_not_stored() {
         let cache = ImageCache::new(4, 100);
-        cache.put("users/u/huge.jpg", CachedImage {
-            body: vec![0u8; 200],
-            content_type: "image/jpeg".to_string(),
-        });
+        cache.put(
+            "users/u/huge.jpg",
+            CachedImage {
+                body: vec![0u8; 200],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
         // Storing it would have evicted everything else, so it is not cached at
         // all ...
         assert!(cache.get("users/u/huge.jpg").is_none());
 
         // ... and the responses around it stay available.
-        cache.put("users/u/small.jpg?width=480", CachedImage {
-            body: vec![0u8; 10],
-            content_type: "image/jpeg".to_string(),
-        });
+        cache.put(
+            "users/u/small.jpg?width=480",
+            CachedImage {
+                body: vec![0u8; 10],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
         assert!(cache.get("users/u/small.jpg?width=480").is_some());
     }
 
     #[test]
     fn eviction_retires_the_least_recently_used() {
         let cache = ImageCache::new(2, 4096);
-        cache.put("a", CachedImage { body: vec![0u8; 8], content_type: "image/jpeg".to_string() });
-        cache.put("b", CachedImage { body: vec![0u8; 8], content_type: "image/jpeg".to_string() });
+        cache.put(
+            "a",
+            CachedImage {
+                body: vec![0u8; 8],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
+        cache.put(
+            "b",
+            CachedImage {
+                body: vec![0u8; 8],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
         // Reading `a` makes `b` the older of the two.
         cache.get("a");
-        cache.put("c", CachedImage { body: vec![0u8; 8], content_type: "image/jpeg".to_string() });
+        cache.put(
+            "c",
+            CachedImage {
+                body: vec![0u8; 8],
+                content_type: "image/jpeg".to_string(),
+            },
+        );
 
         assert!(cache.get("b").is_none());
         assert!(cache.get("a").is_some());

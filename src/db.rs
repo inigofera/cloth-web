@@ -1,8 +1,8 @@
-use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::routes::{ColumnInfo, quote_ident};
+use crate::routes::{quote_ident, ColumnInfo};
 
 pub async fn connect_db() -> Pool<Postgres> {
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
@@ -93,7 +93,10 @@ impl TableFacts {
     }
 
     pub fn column_names(&self) -> Vec<String> {
-        self.columns.iter().map(|fact| fact.column_name.clone()).collect()
+        self.columns
+            .iter()
+            .map(|fact| fact.column_name.clone())
+            .collect()
     }
 
     pub fn covers_columns(&self, keys: &Vec<String>) -> bool {
@@ -139,13 +142,13 @@ pub fn id_filters_for(data_type: String) -> (String, String) {
 pub fn insert_select_list_for(columns: &Vec<ColumnFact>) -> String {
     columns
         .iter()
-        .map(|fact|
-            match fact.column_name.as_str() {
-                "created_at" | "updated_at" =>
-                    format!("COALESCE(r.\"{}\", now()) AS \"{}\"", fact.column_name, fact.column_name),
-                _ => format!("r.\"{}\"", fact.column_name),
-            }
-        )
+        .map(|fact| match fact.column_name.as_str() {
+            "created_at" | "updated_at" => format!(
+                "COALESCE(r.\"{}\", now()) AS \"{}\"",
+                fact.column_name, fact.column_name
+            ),
+            _ => format!("r.\"{}\"", fact.column_name),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -161,7 +164,11 @@ pub fn facts_for(table: String, columns: Vec<ColumnFact>) -> TableFacts {
         .find(|fact| fact.column_name == "id")
         .map(|fact| fact.data_type.clone())
         .unwrap_or("".to_string());
-    let id_kind = if id_data_type == "uuid" { "uuid".to_string() } else { "other".to_string() };
+    let id_kind = if id_data_type == "uuid" {
+        "uuid".to_string()
+    } else {
+        "other".to_string()
+    };
     let (id_filter, id_filter_aliased) = id_filters_for(id_data_type);
     let order_sql = order_sql_for(has_created_at, has_id);
     let select_list = if columns.is_empty() {
@@ -246,7 +253,9 @@ pub struct SchemaCache {
 
 impl SchemaCache {
     pub fn new() -> SchemaCache {
-        SchemaCache { state: Mutex::new(SchemaSnapshot::empty()) }
+        SchemaCache {
+            state: Mutex::new(SchemaSnapshot::empty()),
+        }
     }
 
     // Read the whole public schema and replace the snapshot with it: migration-time truth
@@ -284,7 +293,7 @@ impl SchemaCache {
             } else {
                 pending.push(column);
             };
-        };
+        }
         if current != "" {
             let facts = facts_for(current, pending);
             listing.push(facts.clone());
@@ -292,7 +301,10 @@ impl SchemaCache {
         };
 
         let table_count = listing.len();
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.by_name = by_name;
         state.listing = listing;
         state.unknown = HashMap::new();
@@ -301,7 +313,10 @@ impl SchemaCache {
 
     // Facts for one table out of the snapshot, without touching the wire.
     pub fn probe(&self, table: String) -> Option<TableFacts> {
-        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match state.by_name.get(&table) {
             None => None,
             Some(facts) => Some(facts.clone()),
@@ -315,14 +330,21 @@ impl SchemaCache {
     // A name the last schema read did not find. Kept as its own short lock so the refresh
     // that follows is never waiting on a lock this method still holds.
     pub fn unknown_for(&self, table: String) -> bool {
-        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.unknown.contains_key(&table)
     }
 
-    pub async fn facts(&self, pool: &sqlx::Pool<sqlx::Postgres>, table: String) -> Option<TableFacts> {
+    pub async fn facts(
+        &self,
+        pool: &sqlx::Pool<sqlx::Postgres>,
+        table: String,
+    ) -> Option<TableFacts> {
         match self.probe(table.clone()) {
             Some(facts) => return Some(facts),
-            None => {},
+            None => {}
         };
 
         if self.unknown_for(table.clone()) {
@@ -337,10 +359,13 @@ impl SchemaCache {
         match self.probe(table.clone()) {
             Some(facts) => Some(facts),
             None => {
-                let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.unknown.insert(table, true);
                 None
-            },
+            }
         }
     }
 
@@ -360,7 +385,7 @@ impl SchemaCache {
                 if found.covers_columns(keys) {
                     return Some(found);
                 };
-            },
+            }
             None => return None,
         };
 
@@ -370,7 +395,10 @@ impl SchemaCache {
 
     // Every table the snapshot knows, in schema order, for the `GET /db` listing.
     pub fn snapshot(&self) -> Vec<TableFacts> {
-        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.listing.clone()
     }
 }
@@ -378,21 +406,30 @@ impl SchemaCache {
 #[cfg(test)]
 pub mod schema_tests {
     use super::facts_for;
-    use super::order_sql_for;
     use super::id_filters_for;
     use super::insert_select_list_for;
+    use super::order_sql_for;
     use super::ColumnFact;
 
     fn id_of(kind: String) -> ColumnFact {
-        ColumnFact { column_name: "id".to_string(), data_type: kind }
+        ColumnFact {
+            column_name: "id".to_string(),
+            data_type: kind,
+        }
     }
 
     fn created_at() -> ColumnFact {
-        ColumnFact { column_name: "created_at".to_string(), data_type: "timestamp with time zone".to_string() }
+        ColumnFact {
+            column_name: "created_at".to_string(),
+            data_type: "timestamp with time zone".to_string(),
+        }
     }
 
     fn owner() -> ColumnFact {
-        ColumnFact { column_name: "user_id".to_string(), data_type: "uuid".to_string() }
+        ColumnFact {
+            column_name: "user_id".to_string(),
+            data_type: "uuid".to_string(),
+        }
     }
 
     #[test]
@@ -406,7 +443,12 @@ pub mod schema_tests {
         assert!(facts.id_kind == "uuid");
         assert!(facts.scoped_rows_sql.find("COUNT(*) OVER () AS total") != None);
         assert!(facts.scoped_rows_sql.find("WHERE t.user_id = $1") != None);
-        assert!(facts.scoped_rows_sql.find("ORDER BY t.\"created_at\" DESC NULLS LAST, t.id ASC") != None);
+        assert!(
+            facts
+                .scoped_rows_sql
+                .find("ORDER BY t.\"created_at\" DESC NULLS LAST, t.id ASC")
+                != None
+        );
         assert!(facts.scoped_rows_sql.find("LIMIT $2 OFFSET $3") != None);
         // The paging order has to be stable: a page boundary may only skip rows the previous
         // page already answered.
@@ -433,7 +475,13 @@ pub mod schema_tests {
         // parameter carries the cast so the primary key index still answers the lookup.
         let colors = facts_for(
             "colors".to_string(),
-            vec![id_of("text".to_string()), ColumnFact { column_name: "hex".to_string(), data_type: "text".to_string() }],
+            vec![
+                id_of("text".to_string()),
+                ColumnFact {
+                    column_name: "hex".to_string(),
+                    data_type: "text".to_string(),
+                },
+            ],
         );
         assert!(!colors.has_user_id);
         assert!(colors.shared_rows_sql.find("COUNT(*) OVER () AS total") != None);
@@ -442,7 +490,13 @@ pub mod schema_tests {
         // An id column of some other shape falls back to comparing its rendered text.
         let unkeyed = facts_for(
             "categories".to_string(),
-            vec![ColumnFact { column_name: "category_id".to_string(), data_type: "int8".to_string() }, owner()],
+            vec![
+                ColumnFact {
+                    column_name: "category_id".to_string(),
+                    data_type: "int8".to_string(),
+                },
+                owner(),
+            ],
         );
         assert!(unkeyed.id_kind == "other");
         assert!(unkeyed.id_filter == "id::text = $1");
@@ -454,9 +508,15 @@ pub mod schema_tests {
 
     #[test]
     fn insert_gives_created_rows_the_timestamps() {
-        let select_list = insert_select_list_for(
-            &vec![id_of("uuid".to_string()), created_at(), ColumnFact { column_name: "updated_at".to_string(), data_type: "timestamp".to_string() }, owner()],
-        );
+        let select_list = insert_select_list_for(&vec![
+            id_of("uuid".to_string()),
+            created_at(),
+            ColumnFact {
+                column_name: "updated_at".to_string(),
+                data_type: "timestamp".to_string(),
+            },
+            owner(),
+        ]);
         assert!(select_list.find("COALESCE(r.\"created_at\", now()) AS \"created_at\"") != None);
         assert!(select_list.find("COALESCE(r.\"updated_at\", now()) AS \"updated_at\"") != None);
         assert!(select_list.find("COALESCE(r.\"user_id\", now())") == None);
@@ -466,10 +526,21 @@ pub mod schema_tests {
     fn update_statement_is_split_around_the_set_list() {
         let facts = facts_for(
             "user-settings".to_string(),
-            vec![id_of("uuid".to_string()), ColumnFact { column_name: "updated_at".to_string(), data_type: "timestamp".to_string() }],
+            vec![
+                id_of("uuid".to_string()),
+                ColumnFact {
+                    column_name: "updated_at".to_string(),
+                    data_type: "timestamp".to_string(),
+                },
+            ],
         );
         assert!(facts.has_updated_at);
-        assert!(facts.update_head.find("UPDATE public.\"user-settings\" AS t") != None);
+        assert!(
+            facts
+                .update_head
+                .find("UPDATE public.\"user-settings\" AS t")
+                != None
+        );
         assert!(facts.update_head.find("SET") != None);
         assert!(facts.update_tail.find("RETURNING to_jsonb(t) AS row") != None);
     }

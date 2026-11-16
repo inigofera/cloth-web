@@ -1,19 +1,19 @@
 use axum::{
-    Json,
     extract::{Multipart, Path, Query, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::Response,
+    Json,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use sqlx::{Error as SqlxError, FromRow, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Row, Error as SqlxError};
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::auth::AuthUser;
 use crate::cache::CachedImage;
+use crate::AppState;
 
 #[derive(Serialize, FromRow)]
 pub struct ColumnInfo {
@@ -38,13 +38,11 @@ pub async fn list_tables(
             continue;
         }
         for column in facts.columns {
-            rows.push(
-                ColumnInfo {
-                    table_name: facts.name.clone(),
-                    column_name: column.column_name.clone(),
-                    data_type: column.data_type.clone(),
-                }
-            );
+            rows.push(ColumnInfo {
+                table_name: facts.name.clone(),
+                column_name: column.column_name.clone(),
+                data_type: column.data_type.clone(),
+            });
         }
     }
 
@@ -54,7 +52,6 @@ pub async fn list_tables(
 pub fn is_generic_crud_table_blocked(table: &str) -> bool {
     table == "user-settings"
 }
-
 
 // The questions the CRUD surface used to ask Postgres per request - does this table exist,
 // is it scoped to one user, which columns does it carry - are answered by the schema
@@ -68,11 +65,17 @@ pub fn quote_ident(table: &str) -> String {
 fn db_write_error(error: SqlxError) -> (StatusCode, String) {
     if let SqlxError::Database(database_error) = &error {
         if database_error.code().as_deref() == Some("23514") {
-            return (StatusCode::BAD_REQUEST, "value violates a field constraint".into());
+            return (
+                StatusCode::BAD_REQUEST,
+                "value violates a field constraint".into(),
+            );
         }
     }
     eprintln!("database write failed: {error}");
-    (StatusCode::INTERNAL_SERVER_ERROR, "database write failed".into())
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "database write failed".into(),
+    )
 }
 
 /// Hard cap for a single table read. Deliberately far beyond any realistic personal
@@ -85,7 +88,10 @@ const TABLE_ROWS_MAX_LIMIT: i64 = 10_000;
 /// when a page is shorter than the total. A client that sees rows shorter than
 /// this total knows the table was capped, not emptied (see UX_ANALYSIS.md, problem
 /// 1 / P1-B1).
-fn with_total_count(total: i64, rows: Vec<JsonValue>) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
+fn with_total_count(
+    total: i64,
+    rows: Vec<JsonValue>,
+) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
     let mut headers = axum::http::HeaderMap::new();
     // An integer always parses as a valid header value; the if-let keeps this
     // panic-free without adding a dependency.
@@ -191,13 +197,19 @@ pub async fn insert_table_row(
         None => vec![],
         Some(obj) => obj.keys().map(|k| k.to_string()).collect(),
     };
-    let facts = state.schema.facts_for_write(&state.db, table.to_string(), &keys).await;
+    let facts = state
+        .schema
+        .facts_for_write(&state.db, table.to_string(), &keys)
+        .await;
     let found = match facts {
         None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
         Some(facts) => facts,
     };
     if !found.has_user_id {
-        return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "table is shared reference data".into(),
+        ));
     }
 
     // Reject image_path values that point outside the user's own folder.
@@ -255,7 +267,10 @@ pub async fn delete_table_row(
         Some(facts) => facts,
     };
     if !found.has_user_id {
-        return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "table is shared reference data".into(),
+        ));
     }
 
     let row: Option<(JsonValue,)> = match found.id_kind.as_str() {
@@ -302,7 +317,10 @@ pub async fn update_table_row(
         Some(facts) => facts,
     };
     if !found.has_user_id {
-        return Err((StatusCode::FORBIDDEN, "table is shared reference data".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "table is shared reference data".into(),
+        ));
     }
 
     let obj = match payload.as_object() {
@@ -383,8 +401,12 @@ pub async fn create_color(
     let hex_value = match &req.hex_value {
         Some(h) if !h.trim().is_empty() => {
             let h = h.trim();
-            if h.len() != 7 || !h.starts_with('#') || !h[1..].chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err((StatusCode::BAD_REQUEST, "hex_value must be in #RRGGBB format".into()));
+            if h.len() != 7 || !h.starts_with('#') || !h[1..].chars().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "hex_value must be in #RRGGBB format".into(),
+                ));
             }
             Some(h.to_string())
         }
@@ -400,7 +422,12 @@ pub async fn create_color(
     .bind(&hex_value)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create color: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not create color: {e}"),
+        )
+    })?;
 
     Ok(Json(row.0))
 }
@@ -427,7 +454,12 @@ pub async fn create_category(
     .bind(name)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create category: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not create category: {e}"),
+        )
+    })?;
 
     Ok(Json(row.0))
 }
@@ -456,7 +488,12 @@ pub async fn create_subcategory(
     .bind(req.category_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create subcategory: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not create subcategory: {e}"),
+        )
+    })?;
 
     Ok(Json(row.0))
 }
@@ -479,8 +516,7 @@ pub struct CreateOutfitRequest {
 // copied into every outfit that names it, so an item worn 50 times crossed the wire 50 times
 // with all of its fields; the ids keep the join (`ORDER BY ci.name`) the view renders in,
 // while the single copy of each item the client already holds does the rest.
-const OUTFITS_ROW_EXPR: &str =
-    "SELECT to_jsonb(o) || jsonb_build_object(\n\
+const OUTFITS_ROW_EXPR: &str = "SELECT to_jsonb(o) || jsonb_build_object(\n\
      'date', to_char(o.date, 'YYYY-MM-DD'),\n\
      'item_ids', COALESCE((\n\
      SELECT jsonb_agg(oi.clothing_item_id ORDER BY ci.name)\n\
@@ -529,7 +565,9 @@ pub async fn list_outfits(
 
     with_total_count(
         total,
-        rows.into_iter().map(|r| r.get::<JsonValue, _>("row")).collect(),
+        rows.into_iter()
+            .map(|r| r.get::<JsonValue, _>("row"))
+            .collect(),
     )
 }
 
@@ -546,7 +584,10 @@ pub async fn create_outfit(
     // statement below carries uuids this server produced, never text the client chose, and
     // one outfit cannot point at the same item twice.
     if req.item_ids.len() > 200 {
-        return Err((StatusCode::BAD_REQUEST, "an outfit cannot carry more than 200 items".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "an outfit cannot carry more than 200 items".to_string(),
+        ));
     }
 
     let mut item_literals: Vec<String> = vec![];
@@ -554,10 +595,13 @@ pub async fn create_outfit(
         match Uuid::parse_str(raw_id) {
             Err(_) => return Err((StatusCode::BAD_REQUEST, "item id is not a uuid".to_string())),
             Ok(item_uuid) => {
-                if !item_literals.iter().any(|seen| *seen == item_uuid.to_string()) {
+                if !item_literals
+                    .iter()
+                    .any(|seen| *seen == item_uuid.to_string())
+                {
                     item_literals.push(item_uuid.to_string());
                 }
-            },
+            }
         }
     }
 
@@ -578,7 +622,6 @@ pub async fn create_outfit(
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not create outfit: {e}")))?;
 
-
     let outfit = row.0;
     let outfit_id = outfit
         .get("id")
@@ -589,13 +632,24 @@ pub async fn create_outfit(
     // Every link this request asks for goes over the wire in one statement, rather than
     // one round trip per item: an outfit with a dozen pieces used to pay a dozen queries.
     if !item_literals.is_empty() {
-        let pairs: Vec<String> = item_literals.iter().map(|literal| format!("($1::uuid, '{}')", literal)).collect();
-        let link_sql = format!("INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES {}", pairs.join(", "));
+        let pairs: Vec<String> = item_literals
+            .iter()
+            .map(|literal| format!("($1::uuid, '{}')", literal))
+            .collect();
+        let link_sql = format!(
+            "INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES {}",
+            pairs.join(", ")
+        );
         sqlx::query(&link_sql)
-        .bind(&outfit_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not link items: {e}")))?;
+            .bind(&outfit_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("could not link items: {e}"),
+                )
+            })?;
     }
 
     sqlx::query(
@@ -615,11 +669,16 @@ pub async fn create_outfit(
     // and no window where the outfit exists but its items do not.
     let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2");
     let created: (JsonValue,) = sqlx::query_as(&created_sql)
-    .bind(user_id)
-    .bind(&outfit_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the outfit: {e}")))?;
+        .bind(user_id)
+        .bind(&outfit_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read back the outfit: {e}"),
+            )
+        })?;
 
     tx.commit()
         .await
@@ -719,15 +778,16 @@ pub fn validate_local_qwen_url(raw_url: &str) -> Result<reqwest::Url, String> {
         return Err("Local Qwen URL cannot be empty".to_string());
     }
 
-    let parsed = reqwest::Url::parse(trimmed)
-        .map_err(|e| format!("Invalid URL: {e}"))?;
+    let parsed = reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid URL: {e}"))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err("URL scheme must be http or https".to_string());
     }
 
-    let host = parsed.host_str().ok_or_else(|| "URL must have a host".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL must have a host".to_string())?;
 
     // Block link-local addresses (e.g. AWS/GCP/Azure cloud metadata 169.254.x.x)
     if host == "169.254.169.254" || host.starts_with("169.254.") {
@@ -744,7 +804,8 @@ pub fn validate_local_qwen_url(raw_url: &str) -> Result<reqwest::Url, String> {
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let is_loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    let is_loopback =
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
 
     if is_loopback {
         return Ok(parsed);
@@ -798,14 +859,30 @@ pub async fn get_user_settings(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to fetch settings: {e}")))?;
 
-    let (has_api_key, api_key_hint, reference_image_path, tryon_provider, local_qwen_url, discord_user_id) = match row {
-        Some((Some(enc), Some(nonce), ref_path, provider, qwen_url, disc_id)) if !enc.is_empty() && !nonce.is_empty() => {
+    let (
+        has_api_key,
+        api_key_hint,
+        reference_image_path,
+        tryon_provider,
+        local_qwen_url,
+        discord_user_id,
+    ) = match row {
+        Some((Some(enc), Some(nonce), ref_path, provider, qwen_url, disc_id))
+            if !enc.is_empty() && !nonce.is_empty() =>
+        {
             let provider = provider.unwrap_or_else(|| "gemini".to_string());
             let qwen_url = qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
             match crate::crypto::decrypt_api_key(&enc, &nonce, &state.encryption_key) {
                 Ok(plain) => {
                     let hint = if plain.chars().count() >= 4 {
-                        let last4: String = plain.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+                        let last4: String = plain
+                            .chars()
+                            .rev()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
                         format!("...{last4}")
                     } else {
                         format!("...{plain}")
@@ -827,7 +904,14 @@ pub async fn get_user_settings(
             qwen_url.unwrap_or_else(|| "http://127.0.0.1:8001".to_string()),
             disc_id,
         ),
-        None => (false, None, None, "gemini".to_string(), "http://127.0.0.1:8001".to_string(), None),
+        None => (
+            false,
+            None,
+            None,
+            "gemini".to_string(),
+            "http://127.0.0.1:8001".to_string(),
+            None,
+        ),
     };
 
     Ok(Json(UserSettingsResponse {
@@ -858,7 +942,12 @@ pub async fn update_user_settings(
                     ));
                 }
                 let (enc, nonce) = crate::crypto::encrypt_api_key(trimmed, &state.encryption_key)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encryption error: {e}")))?;
+                    .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("encryption error: {e}"),
+                    )
+                })?;
                 (true, Some(enc), Some(nonce))
             }
         }
@@ -894,9 +983,11 @@ pub async fn update_user_settings(
 
     let (update_qwen_url, new_qwen_url) = match payload.local_qwen_url {
         Some(ref u) => {
-            let parsed = validate_local_qwen_url(u)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-            (true, Some(parsed.to_string().trim_end_matches('/').to_string()))
+            let parsed = validate_local_qwen_url(u).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            (
+                true,
+                Some(parsed.to_string().trim_end_matches('/').to_string()),
+            )
         }
         None => (false, None),
     };
@@ -985,9 +1076,9 @@ pub async fn test_qwen_connection(
     Query(params): Query<TestQwenParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let target_url = match params.url {
-        Some(u) if !u.trim().is_empty() => {
-            validate_local_qwen_url(&u).map_err(|e| (StatusCode::BAD_REQUEST, e))?.to_string()
-        }
+        Some(u) if !u.trim().is_empty() => validate_local_qwen_url(&u)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+            .to_string(),
         _ => {
             let row: Option<(Option<String>,)> = sqlx::query_as(
                 r#"SELECT local_qwen_url FROM public."user-settings" WHERE user_id = $1"#,
@@ -995,10 +1086,19 @@ pub async fn test_qwen_connection(
             .bind(user_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to query settings: {e}")))?;
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to query settings: {e}"),
+                )
+            })?;
 
-            let saved_url = row.and_then(|r| r.0).unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
-            validate_local_qwen_url(&saved_url).map_err(|e| (StatusCode::BAD_REQUEST, e))?.to_string()
+            let saved_url = row
+                .and_then(|r| r.0)
+                .unwrap_or_else(|| "http://127.0.0.1:8001".to_string());
+            validate_local_qwen_url(&saved_url)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+                .to_string()
         }
     };
 
@@ -1010,16 +1110,12 @@ pub async fn test_qwen_connection(
         .build()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let res = client
-        .get(&health_url)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to connect to local Qwen server at {health_url}: {e}"),
-            )
-        })?;
+    let res = client.get(&health_url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Failed to connect to local Qwen server at {health_url}: {e}"),
+        )
+    })?;
 
     let status = res.status();
     if !status.is_success() {
@@ -1030,10 +1126,12 @@ pub async fn test_qwen_connection(
         ));
     }
 
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid JSON from local Qwen server: {e}")))?;
+    let json: serde_json::Value = res.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid JSON from local Qwen server: {e}"),
+        )
+    })?;
 
     Ok(Json(json))
 }
@@ -1051,13 +1149,17 @@ pub fn build_qwen_prompt(items: &[GarmentItemRow]) -> String {
         let name = &item.name;
         prompt.push_str(&format!(
             "- Picture {}: {} ({}) in {}, \"{}\"\n",
-            idx + 2, cat, subcat, color, name
+            idx + 2,
+            cat,
+            subcat,
+            color,
+            name
         ));
     }
 
     prompt.push_str(
         "Remove any existing clothing in Picture 1 that conflicts with these garments. \
-         Ensure natural fabric drape, realistic lighting, and accurate garment details."
+         Ensure natural fabric drape, realistic lighting, and accurate garment details.",
     );
 
     prompt
@@ -1147,12 +1249,22 @@ pub async fn generate_outfit_preview(
                 ));
             }
         };
-        let key = crate::crypto::decrypt_api_key(encrypted_api_key, api_key_nonce, &state.encryption_key)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to decrypt API key: {e}")))?;
+        let key =
+            crate::crypto::decrypt_api_key(encrypted_api_key, api_key_nonce, &state.encryption_key)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to decrypt API key: {e}"),
+                    )
+                })?;
         Some(key)
     } else {
-        validate_local_qwen_url(&local_qwen_url)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid local Qwen URL: {e}")))?;
+        validate_local_qwen_url(&local_qwen_url).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid local Qwen URL: {e}"),
+            )
+        })?;
         None
     };
 
@@ -1174,7 +1286,12 @@ pub async fn generate_outfit_preview(
     .bind(user_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to query items: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to query items: {e}"),
+        )
+    })?;
 
     for req_id in &payload.item_ids {
         if !items.iter().any(|item| item.id == *req_id) {
@@ -1207,7 +1324,12 @@ pub async fn generate_outfit_preview(
 
     let downloaded_images = futures::future::try_join_all(download_futures)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to download images from storage: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to download images from storage: {e}"),
+            )
+        })?;
 
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -1218,7 +1340,10 @@ pub async fn generate_outfit_preview(
 
     let (ref_w, ref_h) = match image::load_from_memory(ref_bytes) {
         Ok(img) => {
-            let oriented = crate::upload::apply_orientation(img.to_rgba8(), crate::upload::exif_orientation(ref_bytes));
+            let oriented = crate::upload::apply_orientation(
+                img.to_rgba8(),
+                crate::upload::exif_orientation(ref_bytes),
+            );
             oriented.dimensions()
         }
         Err(_) => (1024, 1024),
@@ -1266,27 +1391,45 @@ pub async fn generate_outfit_preview(
             .json(&qwen_request)
             .send()
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to reach local Qwen server at {gen_endpoint}: {e}")))?;
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to reach local Qwen server at {gen_endpoint}: {e}"),
+                )
+            })?;
 
         let status = res.status();
         if !status.is_success() {
             let err_text = res.text().await.unwrap_or_default();
-            return Err((StatusCode::BAD_GATEWAY, format!("Local Qwen server error ({status}): {err_text}")));
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!("Local Qwen server error ({status}): {err_text}"),
+            ));
         }
 
-        let res_json: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid response from local Qwen server: {e}")))?;
+        let res_json: serde_json::Value = res.json().await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid response from local Qwen server: {e}"),
+            )
+        })?;
 
         let b64 = res_json
             .get("image_base64")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| (StatusCode::BAD_GATEWAY, "Local Qwen server response missing 'image_base64'".to_string()))?;
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Local Qwen server response missing 'image_base64'".to_string(),
+                )
+            })?;
 
-        BASE64
-            .decode(b64)
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to decode image from local Qwen server: {e}")))?
+        BASE64.decode(b64).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to decode image from local Qwen server: {e}"),
+            )
+        })?
     } else {
         let api_key = gemini_api_key.expect("Gemini API key verified above");
         let mut parts: Vec<serde_json::Value> = Vec::new();
@@ -1387,7 +1530,8 @@ pub async fn generate_outfit_preview(
         let status = res.status();
         if !status.is_success() {
             let err_text = res.text().await.unwrap_or_default();
-            let error_msg = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&err_text) {
+            let error_msg = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&err_text)
+            {
                 if let Some(msg) = parsed.pointer("/error/message").and_then(|v| v.as_str()) {
                     msg.to_string()
                 } else {
@@ -1402,13 +1546,18 @@ pub async fn generate_outfit_preview(
             } else {
                 StatusCode::BAD_GATEWAY
             };
-            return Err((mapped_status, format!("Gemini API error ({status}): {error_msg}")));
+            return Err((
+                mapped_status,
+                format!("Gemini API error ({status}): {error_msg}"),
+            ));
         }
 
-        let res_json: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid response from Gemini API: {e}")))?;
+        let res_json: serde_json::Value = res.json().await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid response from Gemini API: {e}"),
+            )
+        })?;
 
         let candidates = res_json.get("candidates").and_then(|c| c.as_array());
         let parts = candidates
@@ -1441,16 +1590,16 @@ pub async fn generate_outfit_preview(
             }
         };
 
-        BASE64
-            .decode(base64_image)
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to decode image from Gemini: {e}")))?
+        BASE64.decode(base64_image).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to decode image from Gemini: {e}"),
+            )
+        })?
     };
 
-    let (processed_bytes, _) = crate::upload::process_and_encode_image_matching_aspect(
-        &raw_bytes,
-        ref_w,
-        ref_h,
-    )?;
+    let (processed_bytes, _) =
+        crate::upload::process_and_encode_image_matching_aspect(&raw_bytes, ref_w, ref_h)?;
 
     let key = format!("users/{user_id}/{}-tryon.jpg", Uuid::new_v4());
     // Generate the thumbnails before the upload below takes the bytes.
@@ -1460,7 +1609,12 @@ pub async fn generate_outfit_preview(
         .storage
         .upload_file(&key, processed_bytes)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save generated image: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to save generated image: {e}"),
+            )
+        })?;
 
     // A preview is displayed like any other image (`?width=480` on the grid), so
     // it gets the same thumbnail objects: without them every view of a preview
@@ -1469,13 +1623,11 @@ pub async fn generate_outfit_preview(
         let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
         match state.storage.upload_file(&thumb_key, thumb_bytes).await {
             Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-            Ok(_) => {},
+            Ok(_) => {}
         };
-    };
+    }
 
-    Ok(Json(GeneratePreviewResponse {
-        image_path: key,
-    }))
+    Ok(Json(GeneratePreviewResponse { image_path: key }))
 }
 
 const MAX_IMAGE_DIMENSION: u32 = 1600;
@@ -1549,7 +1701,12 @@ fn compress_image(data: &[u8], filename: &str) -> (Vec<u8>, String) {
     let mut out = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
     if encoder
-        .encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
         .is_err()
         || out.len() >= data.len()
     {
@@ -1566,20 +1723,23 @@ pub async fn upload_file(
 ) -> Result<Json<String>, (StatusCode, String)> {
     let storage = &state.storage;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid multipart body: {e}")))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid multipart body: {e}"),
+        )
+    })? {
         let raw_name = field
             .file_name()
             .map(str::to_owned)
             .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing file name".to_string()))?;
 
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not read upload: {e}")))?;
+        let data = field.bytes().await.map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("could not read upload: {e}"),
+            )
+        })?;
 
         if data.len() > crate::upload::MAX_UPLOAD_BYTES {
             return Err((
@@ -1611,10 +1771,12 @@ pub async fn upload_file(
         // upload below moves them (`upload.rs`: `THUMB_WIDTHS`).
         let thumbs = crate::upload::thumbs_from_stored(&data);
 
-        storage
-            .upload_file(&key, data)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage upload failed: {e}")))?;
+        storage.upload_file(&key, data).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("storage upload failed: {e}"),
+            )
+        })?;
 
         // Also store those thumbnails next to the image, so `/files/*path?width=`
         // can answer with a copy of a small stored object (`serve_file` below)
@@ -1626,9 +1788,9 @@ pub async fn upload_file(
             let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
             match storage.upload_file(&thumb_key, thumb_bytes).await {
                 Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-                Ok(_) => {},
+                Ok(_) => {}
             };
-        };
+        }
 
         return Ok(Json(storage.get_public_url(&key).await));
     }
@@ -1705,9 +1867,12 @@ fn validate_image_path(value: &JsonValue, user_id: &Uuid) -> Result<(), (StatusC
     if value.is_null() {
         return Ok(());
     }
-    let path = value
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "image_path must be a string".into()))?;
+    let path = value.as_str().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "image_path must be a string".into(),
+        )
+    })?;
     if path.is_empty() {
         return Ok(());
     }
@@ -1767,14 +1932,23 @@ async fn served_from_thumb(state: Arc<AppState>, path: &str, width: u32) -> Opti
     if bucket == width {
         // Exact match for the widths the UI asks for: the response *is* the
         // stored object, copied straight through with no decode at all.
-        return Some(CachedImage { body: thumb_bytes, content_type: "image/jpeg".to_string() });
+        return Some(CachedImage {
+            body: thumb_bytes,
+            content_type: "image/jpeg".to_string(),
+        });
     }
 
     // Below the bucket: resize the small object we already hold, so the 4032px
     // original is never decoded to make a 28px thumb.
     match resize_image(&thumb_bytes, width) {
-        None => Some(CachedImage { body: thumb_bytes, content_type: "image/jpeg".to_string() }),
-        Some(smaller) => Some(CachedImage { body: smaller, content_type: "image/jpeg".to_string() }),
+        None => Some(CachedImage {
+            body: thumb_bytes,
+            content_type: "image/jpeg".to_string(),
+        }),
+        Some(smaller) => Some(CachedImage {
+            body: smaller,
+            content_type: "image/jpeg".to_string(),
+        }),
     }
 }
 
@@ -1786,7 +1960,11 @@ async fn served_from_thumb(state: Arc<AppState>, path: &str, width: u32) -> Opti
 ///
 /// A thumbnail write that fails is logged but never fails the response: the
 /// image itself is already on its way out.
-async fn served_from_original(state: Arc<AppState>, path: &str, width: Option<u32>) -> Option<CachedImage> {
+async fn served_from_original(
+    state: Arc<AppState>,
+    path: &str,
+    width: Option<u32>,
+) -> Option<CachedImage> {
     let (data, stored_type) = match state.storage.download_file(&path).await {
         Err(_) => return None,
         Ok(v) => v,
@@ -1799,21 +1977,33 @@ async fn served_from_original(state: Arc<AppState>, path: &str, width: Option<u3
             let thumb_key = crate::upload::thumb_storage_key(&path, thumb_width);
             match state.storage.upload_file(&thumb_key, thumb_bytes).await {
                 Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-                Ok(_) => {},
+                Ok(_) => {}
             };
-        };
+        }
     };
 
     if width.is_none() {
-        return Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) });
+        return Some(CachedImage {
+            body: data,
+            content_type: content_type_for(&path, &stored_type),
+        });
     }
 
     match width {
         Some(w) if w > 0 => match resize_image(&data, w) {
-            Some(resized) => Some(CachedImage { body: resized, content_type: "image/jpeg".to_string() }),
-            None => Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) }),
+            Some(resized) => Some(CachedImage {
+                body: resized,
+                content_type: "image/jpeg".to_string(),
+            }),
+            None => Some(CachedImage {
+                body: data,
+                content_type: content_type_for(&path, &stored_type),
+            }),
         },
-        _ => Some(CachedImage { body: data, content_type: content_type_for(&path, &stored_type) }),
+        _ => Some(CachedImage {
+            body: data,
+            content_type: content_type_for(&path, &stored_type),
+        }),
     }
 }
 
@@ -1839,7 +2029,7 @@ pub async fn serve_file(
     // A repeat of the exact same URL never touches the network.
     match state.image_cache.get(&cache_key) {
         Some(hit) => return Ok(image_response(hit)),
-        None => {},
+        None => {}
     };
 
     // Thumbnails first: for the widths the UI asks for this is a copy of a
@@ -1866,7 +2056,7 @@ pub async fn serve_file(
             // already have.
             state.image_cache.put(&cache_key, image.clone());
             Ok(image_response(image))
-        },
+        }
     }
 }
 
@@ -2030,7 +2220,9 @@ mod tests {
         assert!(prompt.contains("Replace the clothes worn by the person in Picture 1 with the garments shown in the following pictures:"));
         assert!(prompt.contains("- Picture 2: Tops (T-Shirts) in Navy, \"Classic Tee\""));
         assert!(prompt.contains("- Picture 3: Bottoms (Jeans) in Blue, \"Slim Jeans\""));
-        assert!(prompt.contains("Remove any existing clothing in Picture 1 that conflicts with these garments."));
+        assert!(prompt.contains(
+            "Remove any existing clothing in Picture 1 that conflicts with these garments."
+        ));
     }
 
     #[test]
@@ -2041,10 +2233,19 @@ mod tests {
         // Same object, different responses: the untouched original, the 480 px
         // grid thumbnail and the 96 px widget thumbnail must never answer for
         // each other.
-        assert_ne!(image_cache_key(&mine, None), image_cache_key(&mine, Some(480)));
-        assert_ne!(image_cache_key(&mine, Some(480)), image_cache_key(&mine, Some(96)));
+        assert_ne!(
+            image_cache_key(&mine, None),
+            image_cache_key(&mine, Some(480))
+        );
+        assert_ne!(
+            image_cache_key(&mine, Some(480)),
+            image_cache_key(&mine, Some(96))
+        );
         // Two users whose paths otherwise look alike never share a slot.
-        assert_ne!(image_cache_key(&mine, Some(480)), image_cache_key(&other, Some(480)));
+        assert_ne!(
+            image_cache_key(&mine, Some(480)),
+            image_cache_key(&other, Some(480))
+        );
         // A thumbnail object is its own entry, not the source image's.
         assert_ne!(
             image_cache_key(&mine, Some(480)),
@@ -2057,12 +2258,13 @@ mod tests {
         // `/files` derives thumbnail keys itself and then serves them through
         // the same ownership check as any other path, so a derived key has to
         // pass that check for its own owner and be refused for another user.
-        let thumb =
-            crate::upload::thumb_storage_key(&format!("users/{ME}/22222222-2222-4222-8222-222222222222-photo.jpg"), 480);
+        let thumb = crate::upload::thumb_storage_key(
+            &format!("users/{ME}/22222222-2222-4222-8222-222222222222-photo.jpg"),
+            480,
+        );
         assert!(object_path_within_user(&thumb, &me()));
 
         let intruder = Uuid::parse_str(OTHER).unwrap();
         assert!(!object_path_within_user(&thumb, &intruder));
     }
 }
-

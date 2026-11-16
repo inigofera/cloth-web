@@ -402,10 +402,7 @@ pub fn score_item_match(query: &str, candidate: &ClothingCandidate) -> f64 {
         return 1.0;
     }
 
-    let q_words: Vec<&str> = norm_q
-        .split_whitespace()
-        .filter(|w| w.len() > 1)
-        .collect();
+    let q_words: Vec<&str> = norm_q.split_whitespace().filter(|w| w.len() > 1).collect();
 
     if q_words.is_empty() {
         return 0.0;
@@ -494,7 +491,7 @@ pub async fn sync_discord_for_user(
 
     // Load reference dictionaries for auto-inferring metadata on new items
     let known_brands = sqlx::query_as::<_, BrandRef>(
-        r#"SELECT id, name FROM brands WHERE user_id = $1 OR user_id IS NULL"#
+        r#"SELECT id, name FROM brands WHERE user_id = $1 OR user_id IS NULL"#,
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -502,18 +499,16 @@ pub async fn sync_discord_for_user(
     .unwrap_or_default();
 
     let known_subcats = sqlx::query_as::<_, SubcategoryRef>(
-        r#"SELECT id, name, category_id FROM "clothing-subcategories""#
+        r#"SELECT id, name, category_id FROM "clothing-subcategories""#,
     )
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
-    let known_colors = sqlx::query_as::<_, ColorRef>(
-        r#"SELECT id FROM colors"#
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let known_colors = sqlx::query_as::<_, ColorRef>(r#"SELECT id FROM colors"#)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
     let mut imported_count = 0;
     let mut messages_processed = 0;
@@ -539,7 +534,11 @@ pub async fn sync_discord_for_user(
         // 1. Check for "!link <code>" or "/link <code>" commands
         let trimmed_content = msg.content.trim();
         let words: Vec<&str> = trimmed_content.split_whitespace().collect();
-        if words.first().map(|w| w.eq_ignore_ascii_case("!link") || w.eq_ignore_ascii_case("/link")).unwrap_or(false) {
+        if words
+            .first()
+            .map(|w| w.eq_ignore_ascii_case("!link") || w.eq_ignore_ascii_case("/link"))
+            .unwrap_or(false)
+        {
             messages_processed += 1;
             if let Some(code) = words.get(1) {
                 let code_clean = code.trim();
@@ -573,7 +572,9 @@ pub async fn sync_discord_for_user(
                 }
             } else {
                 let _ = discord.add_reaction(&msg.id, "❓").await;
-                let reply = "ℹ️ **Usage:** Send `!link <6-digit-code>` to connect your Cloth Web account.".to_string();
+                let reply =
+                    "ℹ️ **Usage:** Send `!link <6-digit-code>` to connect your Cloth Web account."
+                        .to_string();
                 let _ = discord.send_reply(&msg.id, &reply).await;
             }
             continue;
@@ -582,7 +583,7 @@ pub async fn sync_discord_for_user(
         // 2. Identify author and verify account linking
         let author_discord_id = &msg.author.id;
         let mut target_user_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(
-            r#"SELECT user_id FROM public."user-settings" WHERE discord_user_id = $1"#
+            r#"SELECT user_id FROM public."user-settings" WHERE discord_user_id = $1"#,
         )
         .bind(author_discord_id)
         .fetch_optional(pool)
@@ -833,11 +834,7 @@ pub async fn sync_discord_for_user(
             }
 
             imported_count += 1;
-            let summary_line = format!(
-                "{} -> [{}]",
-                parsed.date,
-                matched_names.join(", ")
-            );
+            let summary_line = format!("{} -> [{}]", parsed.date, matched_names.join(", "));
             summary.push(summary_line.clone());
 
             let mut confirmation = format!("📅 **{}**:\n", parsed.date);
@@ -916,8 +913,14 @@ mod tests {
     fn test_parse_date_line() {
         assert_eq!(parse_date_line("26/10", 2026), Some("2026-10-26".into()));
         assert_eq!(parse_date_line("03/07", 2026), Some("2026-07-03".into()));
-        assert_eq!(parse_date_line("26/10/2026", 2025), Some("2026-10-26".into()));
-        assert_eq!(parse_date_line("26-10-2026", 2025), Some("2026-10-26".into()));
+        assert_eq!(
+            parse_date_line("26/10/2026", 2025),
+            Some("2026-10-26".into())
+        );
+        assert_eq!(
+            parse_date_line("26-10-2026", 2025),
+            Some("2026-10-26".into())
+        );
         assert_eq!(parse_date_line("benzak white tee", 2026), None);
     }
 

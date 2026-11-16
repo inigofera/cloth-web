@@ -33,8 +33,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .or_else(|| token_from_query(parts))
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
 
-        let decoding_key =
-            jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes());
+        let decoding_key = jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes());
 
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.set_audience(&["authenticated"]);

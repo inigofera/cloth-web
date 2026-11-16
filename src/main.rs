@@ -1,25 +1,30 @@
-mod discord;
 mod auth;
+mod cache;
 mod crypto;
 mod db;
+mod discord;
+mod routes;
 mod storage;
 mod upload;
-mod routes;
-mod cache;
 
-use axum::{Router, routing::{get, post}, extract::DefaultBodyLimit};
 use axum::serve;
-use tokio::net::TcpListener;
-use std::sync::Arc;
-use dotenv::dotenv;
-use db::connect_db;
-use storage::SupabaseStorage;
-use routes::{
-    upload_file, serve_file, list_tables, get_table_rows, insert_table_row,
-    delete_table_row, update_table_row, list_outfits, create_outfit, delete_outfit,
-    create_color, create_category, create_subcategory,
-    get_user_settings, update_user_settings, generate_outfit_preview, test_qwen_connection, sync_discord_outfits, generate_discord_link_code, unlink_discord_account,
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
 };
+use db::connect_db;
+use dotenv::dotenv;
+use routes::{
+    create_category, create_color, create_outfit, create_subcategory, delete_outfit,
+    delete_table_row, generate_discord_link_code, generate_outfit_preview, get_table_rows,
+    get_user_settings, insert_table_row, list_outfits, list_tables, serve_file,
+    sync_discord_outfits, test_qwen_connection, unlink_discord_account, update_table_row,
+    update_user_settings, upload_file,
+};
+use std::sync::Arc;
+use storage::SupabaseStorage;
+use tokio::net::TcpListener;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -55,7 +60,7 @@ async fn main() {
     let mut encryption_key = [0u8; 32];
     encryption_key.copy_from_slice(&key_bytes);
 
-        let db_for_sweep = db.clone();
+    let db_for_sweep = db.clone();
     tokio::spawn(async move {
         let user_id_res = if let Ok(uid_str) = std::env::var("DISCORD_DEFAULT_USER_ID") {
             uuid::Uuid::parse_str(&uid_str).ok()
@@ -69,11 +74,17 @@ async fn main() {
         };
 
         if let Some(user_id) = user_id_res {
-            println!("?? [Discord Sweep] Checking for new outfits from Discord for user {}...", user_id);
+            println!(
+                "?? [Discord Sweep] Checking for new outfits from Discord for user {}...",
+                user_id
+            );
             match discord::sync_discord_for_user(&db_for_sweep, user_id).await {
                 Ok(res) => {
                     if res.imported_count > 0 {
-                        println!("? [Discord Sweep] Successfully imported {} outfit(s) on launch!", res.imported_count);
+                        println!(
+                            "? [Discord Sweep] Successfully imported {} outfit(s) on launch!",
+                            res.imported_count
+                        );
                         for s in res.summary {
                             println!("   � {}", s);
                         }
@@ -105,8 +116,14 @@ async fn main() {
     let app = Router::new()
         .route("/tables", get(list_tables))
         .route("/db/:table", get(get_table_rows).post(insert_table_row))
-        .route("/db/:table/:id", axum::routing::patch(update_table_row).delete(delete_table_row))
-        .route("/settings", get(get_user_settings).put(update_user_settings))
+        .route(
+            "/db/:table/:id",
+            axum::routing::patch(update_table_row).delete(delete_table_row),
+        )
+        .route(
+            "/settings",
+            get(get_user_settings).put(update_user_settings),
+        )
         .route("/settings/test-qwen", get(test_qwen_connection))
         .route("/settings/discord-code", post(generate_discord_link_code))
         .route("/settings/discord-unlink", post(unlink_discord_account))
