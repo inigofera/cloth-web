@@ -277,8 +277,8 @@ pub fn extract_new_item_marker(line: &str) -> (bool, String) {
     }
 
     // Check + prefix
-    if trimmed.starts_with('+') {
-        return (true, trimmed[1..].trim().to_string());
+    if let Some(rest) = trimmed.strip_prefix('+') {
+        return (true, rest.trim().to_string());
     }
 
     (false, trimmed.to_string())
@@ -291,7 +291,7 @@ pub fn parse_date_line(line: &str, fallback_year: i32) -> Option<String> {
     }
 
     let parts: Vec<&str> = trimmed
-        .split(|c| c == '/' || c == '-' || c == '.')
+        .split(['/', '-', '.'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();

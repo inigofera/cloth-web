@@ -59,7 +59,7 @@ pub fn is_generic_crud_table_blocked(table: &str) -> bool {
 // were rendered once per table at startup.
 
 pub fn quote_ident(table: &str) -> String {
-    table.replace('"', "\"")
+    table.replace('"', "\"\"")
 }
 
 fn db_write_error(error: SqlxError) -> (StatusCode, String) {
@@ -120,7 +120,7 @@ pub async fn get_table_rows(
     // answered from memory rather than a schema read before the 404 or empty page.
     let facts = state.schema.facts(&state.db, table.to_string()).await;
     match facts {
-        None => return Ok(with_total_count(0, vec![])),
+        None => Ok(with_total_count(0, vec![])),
         Some(found) => {
             // Clients may request up to TABLE_ROWS_MAX_LIMIT rows, and may ask for
             // a page that starts anywhere: `offset` is a real row offset, so a client
@@ -842,14 +842,16 @@ pub async fn get_user_settings(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<UserSettingsResponse>, (StatusCode, String)> {
-    let row: Option<(
+    // The six settings columns this endpoint reads back (see `user-settings`).
+    type SettingsRow = (
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
-    )> = sqlx::query_as(
+    );
+    let row: Option<SettingsRow> = sqlx::query_as(
         r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url, discord_user_id
            FROM public."user-settings"
            WHERE user_id = $1"#,
@@ -1199,13 +1201,15 @@ pub async fn generate_outfit_preview(
         ));
     }
 
-    let settings_row: Option<(
+    // Same settings columns minus the Discord link (unused by this endpoint).
+    type SettingsRow = (
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<String>,
         Option<String>,
         Option<String>,
-    )> = sqlx::query_as(
+    );
+    let settings_row: Option<SettingsRow> = sqlx::query_as(
         r#"SELECT encrypted_api_key, api_key_nonce, reference_image_path, tryon_provider, local_qwen_url
            FROM public."user-settings"
            WHERE user_id = $1"#,
@@ -1435,11 +1439,9 @@ pub async fn generate_outfit_preview(
         let mut parts: Vec<serde_json::Value> = Vec::new();
 
         parts.push(serde_json::json!({
-            "text": format!(
-                "Task: Photorealistic virtual try-on.\n\
-                 You are dressing the real person shown in the Target User Reference Photo below.\n\n\
-                 [TARGET USER REFERENCE PHOTO]:"
-            )
+            "text": "Task: Photorealistic virtual try-on.\n\
+                    You are dressing the real person shown in the Target User Reference Photo below.\n\n\
+                    [TARGET USER REFERENCE PHOTO]:"
         }));
 
         parts.push(serde_json::json!({
@@ -1621,9 +1623,8 @@ pub async fn generate_outfit_preview(
     // would re-download and re-decode the 1600px original.
     for (thumb_width, thumb_bytes) in thumbs {
         let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
-        match state.storage.upload_file(&thumb_key, thumb_bytes).await {
-            Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-            Ok(_) => {}
+        if let Err(e) = state.storage.upload_file(&thumb_key, thumb_bytes).await {
+            eprintln!("thumbnail store failed for {thumb_key}: {e}")
         };
     }
 
@@ -1723,79 +1724,78 @@ pub async fn upload_file(
 ) -> Result<Json<String>, (StatusCode, String)> {
     let storage = &state.storage;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
+    let Some(field) = multipart.next_field().await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("invalid multipart body: {e}"),
         )
-    })? {
-        let raw_name = field
-            .file_name()
-            .map(str::to_owned)
-            .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing file name".to_string()))?;
+    })?
+    else {
+        return Err((StatusCode::BAD_REQUEST, "no file uploaded".to_string()));
+    };
+    let raw_name = field
+        .file_name()
+        .map(str::to_owned)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing file name".to_string()))?;
 
-        let data = field.bytes().await.map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("could not read upload: {e}"),
-            )
-        })?;
+    let data = field.bytes().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not read upload: {e}"),
+        )
+    })?;
 
-        if data.len() > crate::upload::MAX_UPLOAD_BYTES {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "file too large: {} bytes (max {})",
-                    data.len(),
-                    crate::upload::MAX_UPLOAD_BYTES
-                ),
-            ));
-        }
-
-        let sanitized = crate::upload::sanitize_filename(&raw_name)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-        crate::upload::validate_image_content(&data)
-            .map_err(|e| (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()))?;
-
-        let (data, filename) = compress_image(&data, &sanitized);
-        let key_name = if filename == sanitized {
-            sanitized
-        } else {
-            crate::upload::sanitize_filename(&filename)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
-        };
-        let key = crate::upload::build_storage_key(&user_id, &key_name);
-
-        // Generate the small thumbnails from the processed bytes *before* the
-        // upload below moves them (`upload.rs`: `THUMB_WIDTHS`).
-        let thumbs = crate::upload::thumbs_from_stored(&data);
-
-        storage.upload_file(&key, data).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("storage upload failed: {e}"),
-            )
-        })?;
-
-        // Also store those thumbnails next to the image, so `/files/*path?width=`
-        // can answer with a copy of a small stored object (`serve_file` below)
-        // instead of downloading the full-resolution original and decoding it
-        // once per `<img>` on every page load. The image itself is already
-        // stored, so a thumbnail write is best effort: failing one only means
-        // that width falls back to resizing the original.
-        for (thumb_width, thumb_bytes) in thumbs {
-            let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
-            match storage.upload_file(&thumb_key, thumb_bytes).await {
-                Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-                Ok(_) => {}
-            };
-        }
-
-        return Ok(Json(storage.get_public_url(&key).await));
+    if data.len() > crate::upload::MAX_UPLOAD_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "file too large: {} bytes (max {})",
+                data.len(),
+                crate::upload::MAX_UPLOAD_BYTES
+            ),
+        ));
     }
 
-    Err((StatusCode::BAD_REQUEST, "no file uploaded".to_string()))
+    let sanitized = crate::upload::sanitize_filename(&raw_name)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    crate::upload::validate_image_content(&data)
+        .map_err(|e| (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()))?;
+
+    let (data, filename) = compress_image(&data, &sanitized);
+    let key_name = if filename == sanitized {
+        sanitized
+    } else {
+        crate::upload::sanitize_filename(&filename)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+    let key = crate::upload::build_storage_key(&user_id, &key_name);
+
+    // Generate the small thumbnails from the processed bytes *before* the
+    // upload below moves them (`upload.rs`: `THUMB_WIDTHS`).
+    let thumbs = crate::upload::thumbs_from_stored(&data);
+
+    storage.upload_file(&key, data).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("storage upload failed: {e}"),
+        )
+    })?;
+
+    // Also store those thumbnails next to the image, so `/files/*path?width=`
+    // can answer with a copy of a small stored object (`serve_file` below)
+    // instead of downloading the full-resolution original and decoding it
+    // once per `<img>` on every page load. The image itself is already
+    // stored, so a thumbnail write is best effort: failing one only means
+    // that width falls back to resizing the original.
+    for (thumb_width, thumb_bytes) in thumbs {
+        let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
+        if let Err(e) = storage.upload_file(&thumb_key, thumb_bytes).await {
+            eprintln!("thumbnail store failed for {thumb_key}: {e}")
+        };
+    }
+
+    Ok(Json(storage.get_public_url(&key).await))
 }
 
 fn content_type_for(path: &str, stored: &str) -> String {
@@ -1965,19 +1965,18 @@ async fn served_from_original(
     path: &str,
     width: Option<u32>,
 ) -> Option<CachedImage> {
-    let (data, stored_type) = match state.storage.download_file(&path).await {
+    let (data, stored_type) = match state.storage.download_file(path).await {
         Err(_) => return None,
         Ok(v) => v,
     };
 
     // Never thumbnail an object that is already a thumbnail: that would nest
     // keys (`...dress.thumb480.thumb96.jpg`) behind a single source image.
-    if !crate::upload::is_thumb_key(&path) {
+    if !crate::upload::is_thumb_key(path) {
         for (thumb_width, thumb_bytes) in crate::upload::thumbs_from_stored(&data) {
-            let thumb_key = crate::upload::thumb_storage_key(&path, thumb_width);
-            match state.storage.upload_file(&thumb_key, thumb_bytes).await {
-                Err(e) => eprintln!("thumbnail store failed for {thumb_key}: {e}"),
-                Ok(_) => {}
+            let thumb_key = crate::upload::thumb_storage_key(path, thumb_width);
+            if let Err(e) = state.storage.upload_file(&thumb_key, thumb_bytes).await {
+                eprintln!("thumbnail store failed for {thumb_key}: {e}")
             };
         }
     };
@@ -1985,7 +1984,7 @@ async fn served_from_original(
     if width.is_none() {
         return Some(CachedImage {
             body: data,
-            content_type: content_type_for(&path, &stored_type),
+            content_type: content_type_for(path, &stored_type),
         });
     }
 
@@ -1997,12 +1996,12 @@ async fn served_from_original(
             }),
             None => Some(CachedImage {
                 body: data,
-                content_type: content_type_for(&path, &stored_type),
+                content_type: content_type_for(path, &stored_type),
             }),
         },
         _ => Some(CachedImage {
             body: data,
-            content_type: content_type_for(&path, &stored_type),
+            content_type: content_type_for(path, &stored_type),
         }),
     }
 }
@@ -2027,9 +2026,8 @@ pub async fn serve_file(
     let cache_key = image_cache_key(&path, width);
 
     // A repeat of the exact same URL never touches the network.
-    match state.image_cache.get(&cache_key) {
-        Some(hit) => return Ok(image_response(hit)),
-        None => {}
+    if let Some(hit) = state.image_cache.get(&cache_key) {
+        return Ok(image_response(hit));
     };
 
     // Thumbnails first: for the widths the UI asks for this is a copy of a

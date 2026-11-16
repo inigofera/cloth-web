@@ -106,7 +106,7 @@ impl ImageCache {
                 displaced = old.size;
             }
         };
-        state.stored_bytes = state.stored_bytes - displaced;
+        state.stored_bytes -= displaced;
 
         let tick = state.tick + 1;
         state.tick = tick;
@@ -116,10 +116,10 @@ impl ImageCache {
                 body: image.body,
                 content_type: image.content_type,
                 used: tick,
-                size: size,
+                size,
             },
         );
-        state.stored_bytes = state.stored_bytes + size;
+        state.stored_bytes += size;
 
         while state.entries.len() > self.capacity || state.stored_bytes > self.max_bytes {
             // Oldest last-use wins. The map holds at most `capacity + 1`
@@ -143,7 +143,7 @@ impl ImageCache {
                             evicted = old.size;
                         }
                     };
-                    state.stored_bytes = state.stored_bytes - evicted;
+                    state.stored_bytes -= evicted;
                 }
             };
         }

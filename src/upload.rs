@@ -123,12 +123,7 @@ pub const THUMB_WIDTHS: [u32; 2] = [96, 480];
 /// upscaling, or `None` when the request wants more detail than any generated
 /// thumbnail holds (then `/files` resizes the original).
 pub fn thumbnail_bucket(width: u32) -> Option<u32> {
-    for bucket in THUMB_WIDTHS {
-        if width <= bucket {
-            return Some(bucket);
-        }
-    }
-    None
+    THUMB_WIDTHS.into_iter().find(|&bucket| width <= bucket)
 }
 
 /// Object key of the generated thumbnail for `key`, e.g.
@@ -157,10 +152,7 @@ pub fn is_thumb_key(path: &str) -> bool {
 /// JPEG magic check, same sniffing as `validate_image_content`: thumbnails are
 /// only generated for bytes we know are already JPEG.
 pub fn is_jpeg(bytes: &[u8]) -> bool {
-    match bytes {
-        [0xFF, 0xD8, 0xFF, ..] => true,
-        _ => false,
-    }
+    matches!(bytes, [0xFF, 0xD8, 0xFF, ..])
 }
 
 pub fn exif_orientation(data: &[u8]) -> u16 {
@@ -213,7 +205,7 @@ pub fn best_supported_aspect_ratio(w: u32, h: u32) -> &'static str {
         ("3:2", 3.0 / 2.0),
         ("4:3", 4.0 / 3.0),
         ("5:4", 5.0 / 4.0),
-        ("1:1", 1.0 / 1.0),
+        ("1:1", 1.0),
         ("4:5", 4.0 / 5.0),
         ("3:4", 3.0 / 4.0),
         ("2:3", 2.0 / 3.0),
@@ -373,7 +365,6 @@ pub fn thumbs_from_stored(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
 

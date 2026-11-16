@@ -56,9 +56,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 fn token_from_query(parts: &Parts) -> Option<&str> {
     let query = parts.uri.query()?;
     query.split('&').find_map(|pair| {
-        let mut kv = pair.splitn(2, '=');
-        let key = kv.next()?;
-        let value = kv.next()?;
+        let (key, value) = pair.split_once('=')?;
+
         (key == "token").then_some(value)
     })
 }

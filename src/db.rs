@@ -99,7 +99,7 @@ impl TableFacts {
             .collect()
     }
 
-    pub fn covers_columns(&self, keys: &Vec<String>) -> bool {
+    pub fn covers_columns(&self, keys: &[String]) -> bool {
         keys.iter().all(|key| self.has_column(key.clone()))
     }
 }
@@ -139,7 +139,7 @@ pub fn id_filters_for(data_type: String) -> (String, String) {
 
 // The column list an insert copies out of the posted JSON. `created_at` and `updated_at`
 // fall back to `now()` so a body that omits a timestamp still gets one.
-pub fn insert_select_list_for(columns: &Vec<ColumnFact>) -> String {
+pub fn insert_select_list_for(columns: &[ColumnFact]) -> String {
     columns
         .iter()
         .map(|fact| match fact.column_name.as_str() {
@@ -203,21 +203,21 @@ pub fn facts_for(table: String, columns: Vec<ColumnFact>) -> TableFacts {
 
     TableFacts {
         name: table,
-        quoted_table: quoted_table,
-        columns: columns,
-        has_user_id: has_user_id,
-        has_updated_at: has_updated_at,
-        has_created_at: has_created_at,
-        id_filter: id_filter,
-        id_filter_aliased: id_filter_aliased,
-        id_kind: id_kind,
-        order_sql: order_sql,
-        scoped_rows_sql: scoped_rows_sql,
-        shared_rows_sql: shared_rows_sql,
-        insert_sql: insert_sql,
-        delete_sql: delete_sql,
-        update_head: update_head,
-        update_tail: update_tail,
+        quoted_table,
+        columns,
+        has_user_id,
+        has_updated_at,
+        has_created_at,
+        id_filter,
+        id_filter_aliased,
+        id_kind,
+        order_sql,
+        scoped_rows_sql,
+        shared_rows_sql,
+        insert_sql,
+        delete_sql,
+        update_head,
+        update_tail,
     }
 }
 
@@ -283,7 +283,7 @@ impl SchemaCache {
                 data_type: row.data_type.clone(),
             };
             if current != row.table_name {
-                if current != "" {
+                if !current.is_empty() {
                     let facts = facts_for(current, pending);
                     listing.push(facts.clone());
                     by_name.insert(facts.name.clone(), facts);
@@ -294,7 +294,7 @@ impl SchemaCache {
                 pending.push(column);
             };
         }
-        if current != "" {
+        if !current.is_empty() {
             let facts = facts_for(current, pending);
             listing.push(facts.clone());
             by_name.insert(facts.name.clone(), facts);
@@ -317,10 +317,7 @@ impl SchemaCache {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match state.by_name.get(&table) {
-            None => None,
-            Some(facts) => Some(facts.clone()),
-        }
+        state.by_name.get(&table).cloned()
     }
 
     // Facts for one table, with exactly one schema read behind a name the snapshot never
@@ -342,9 +339,8 @@ impl SchemaCache {
         pool: &sqlx::Pool<sqlx::Postgres>,
         table: String,
     ) -> Option<TableFacts> {
-        match self.probe(table.clone()) {
-            Some(facts) => return Some(facts),
-            None => {}
+        if let Some(facts) = self.probe(table.clone()) {
+            return Some(facts);
         };
 
         if self.unknown_for(table.clone()) {
@@ -377,7 +373,7 @@ impl SchemaCache {
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
         table: String,
-        keys: &Vec<String>,
+        keys: &[String],
     ) -> Option<TableFacts> {
         let facts = self.facts(pool, table.clone()).await;
         match facts {
@@ -441,18 +437,19 @@ pub mod schema_tests {
 
         assert!(facts.has_user_id);
         assert!(facts.id_kind == "uuid");
-        assert!(facts.scoped_rows_sql.find("COUNT(*) OVER () AS total") != None);
-        assert!(facts.scoped_rows_sql.find("WHERE t.user_id = $1") != None);
-        assert!(
-            facts
-                .scoped_rows_sql
-                .find("ORDER BY t.\"created_at\" DESC NULLS LAST, t.id ASC")
-                != None
-        );
-        assert!(facts.scoped_rows_sql.find("LIMIT $2 OFFSET $3") != None);
+        assert!(facts
+            .scoped_rows_sql
+            .find("COUNT(*) OVER () AS total")
+            .is_some());
+        assert!(facts.scoped_rows_sql.find("WHERE t.user_id = $1").is_some());
+        assert!(facts
+            .scoped_rows_sql
+            .find("ORDER BY t.\"created_at\" DESC NULLS LAST, t.id ASC")
+            .is_some());
+        assert!(facts.scoped_rows_sql.find("LIMIT $2 OFFSET $3").is_some());
         // The paging order has to be stable: a page boundary may only skip rows the previous
         // page already answered.
-        assert!(facts.order_sql.find(", t.id ASC") != None);
+        assert!(facts.order_sql.find(", t.id ASC").is_some());
     }
 
     #[test]
@@ -465,8 +462,14 @@ pub mod schema_tests {
             "outfits".to_string(),
             vec![id_of("uuid".to_string()), owner()],
         );
-        assert!(facts.delete_sql.find("WHERE id = $1 AND user_id = $2") != None);
-        assert!(facts.update_tail.find("WHERE t.id = $1 AND t.user_id = $3") != None);
+        assert!(facts
+            .delete_sql
+            .find("WHERE id = $1 AND user_id = $2")
+            .is_some());
+        assert!(facts
+            .update_tail
+            .find("WHERE t.id = $1 AND t.user_id = $3")
+            .is_some());
     }
 
     #[test]
@@ -484,7 +487,10 @@ pub mod schema_tests {
             ],
         );
         assert!(!colors.has_user_id);
-        assert!(colors.shared_rows_sql.find("COUNT(*) OVER () AS total") != None);
+        assert!(colors
+            .shared_rows_sql
+            .find("COUNT(*) OVER () AS total")
+            .is_some());
         assert!(colors.id_filter == "id = $1");
 
         // An id column of some other shape falls back to comparing its rendered text.
@@ -503,12 +509,12 @@ pub mod schema_tests {
         // With no created_at and no id column there is nothing cheap to order by: keep the
         // documented column-position ordering rather than inventing an unstable one.
         assert!(unkeyed.order_sql == order_sql_for(false, false));
-        assert!(unkeyed.order_sql.find("ORDER BY 1") != None);
+        assert!(unkeyed.order_sql.find("ORDER BY 1").is_some());
     }
 
     #[test]
     fn insert_gives_created_rows_the_timestamps() {
-        let select_list = insert_select_list_for(&vec![
+        let select_list = insert_select_list_for(&[
             id_of("uuid".to_string()),
             created_at(),
             ColumnFact {
@@ -517,9 +523,13 @@ pub mod schema_tests {
             },
             owner(),
         ]);
-        assert!(select_list.find("COALESCE(r.\"created_at\", now()) AS \"created_at\"") != None);
-        assert!(select_list.find("COALESCE(r.\"updated_at\", now()) AS \"updated_at\"") != None);
-        assert!(select_list.find("COALESCE(r.\"user_id\", now())") == None);
+        assert!(select_list
+            .find("COALESCE(r.\"created_at\", now()) AS \"created_at\"")
+            .is_some());
+        assert!(select_list
+            .find("COALESCE(r.\"updated_at\", now()) AS \"updated_at\"")
+            .is_some());
+        assert!(select_list.find("COALESCE(r.\"user_id\", now())").is_none());
     }
 
     #[test]
@@ -535,13 +545,14 @@ pub mod schema_tests {
             ],
         );
         assert!(facts.has_updated_at);
-        assert!(
-            facts
-                .update_head
-                .find("UPDATE public.\"user-settings\" AS t")
-                != None
-        );
-        assert!(facts.update_head.find("SET") != None);
-        assert!(facts.update_tail.find("RETURNING to_jsonb(t) AS row") != None);
+        assert!(facts
+            .update_head
+            .find("UPDATE public.\"user-settings\" AS t")
+            .is_some());
+        assert!(facts.update_head.find("SET").is_some());
+        assert!(facts
+            .update_tail
+            .find("RETURNING to_jsonb(t) AS row")
+            .is_some());
     }
 }

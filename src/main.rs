@@ -108,7 +108,7 @@ async fn main() {
         db,
         storage,
         image_cache: Arc::new(cache::ImageCache::new(512, 24 * 1024 * 1024)),
-        schema: schema,
+        schema,
         jwt_secret,
         encryption_key,
     });
