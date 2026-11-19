@@ -56,9 +56,49 @@ async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Respons
     resp
 }
 
+/// One line per request at `debug` level (RUST_LOG), so a quiet server still
+/// leaves an audit trail when someone actually wants to look.
+async fn request_log(req: Request<axum::body::Body>, next: Next) -> Response {
+    let start = std::time::Instant::now();
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let resp = next.run(req).await;
+    tracing::debug!(
+        method = %method,
+        path = %path,
+        status = resp.status().as_u16(),
+        elapsed_ms = start.elapsed().as_millis(),
+        "request"
+    );
+    resp
+}
+
+/// Wait for Ctrl+C or SIGTERM (docker stop), then let axum drain in-flight
+/// requests instead of dying mid-write.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = ctrl_c.await;
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let db = connect_db().await;
     let storage = SupabaseStorage::new();
@@ -93,26 +133,23 @@ async fn main() {
         };
 
         if let Some(user_id) = user_id_res {
-            println!(
-                "?? [Discord Sweep] Checking for new outfits from Discord for user {}...",
-                user_id
-            );
+            tracing::info!(%user_id, "discord sweep: checking for new outfits");
             match discord::sync_discord_for_user(&db_for_sweep, user_id).await {
                 Ok(res) => {
                     if res.imported_count > 0 {
-                        println!(
-                            "? [Discord Sweep] Successfully imported {} outfit(s) on launch!",
-                            res.imported_count
+                        tracing::info!(
+                            imported = res.imported_count,
+                            "discord sweep: imported outfits on launch"
                         );
-                        for s in res.summary {
-                            println!("   � {}", s);
+                        for s in &res.summary {
+                            tracing::info!(line = %s, "discord sweep summary");
                         }
                     } else {
-                        println!("?? [Discord Sweep] Up to date (no new outfits found).");
+                        tracing::info!("discord sweep: up to date (no new outfits)");
                     }
                 }
                 Err(e) => {
-                    eprintln!("?? [Discord Sweep] Error during startup sweep: {}", e);
+                    tracing::error!(%e, "discord sweep failed at startup");
                 }
             }
         }
@@ -135,6 +172,8 @@ async fn main() {
     });
 
     let app = Router::new()
+        // Unauthenticated on purpose: the tunnel and any uptime monitor hit it.
+        .route("/healthz", get(routes::healthz))
         .route("/tables", get(list_tables))
         .route("/db/:table", get(get_table_rows).post(insert_table_row))
         .route(
@@ -161,10 +200,14 @@ async fn main() {
         .route("/files/*path", get(serve_file))
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn(request_log))
         .with_state(state);
 
-    println!("🚀 running on http://localhost:3000");
+    tracing::info!("running on http://localhost:3000");
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
-    serve(listener, app).await.unwrap();
+    serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server failed");
 }

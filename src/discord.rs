@@ -609,7 +609,7 @@ pub async fn sync_discord_for_user(
                         let _ = discord.send_reply(&msg.id, &reply).await;
                     }
                     Err(e) => {
-                        eprintln!("Error linking Discord account: {e}");
+                        tracing::error!(%e, "error linking Discord account");
                     }
                 }
             } else {
@@ -798,7 +798,7 @@ pub async fn sync_discord_for_user(
                 .execute(&mut *tx)
                 .await
                 {
-                    eprintln!("Failed to create new clothing item {}: {e}", new_item.name);
+                    tracing::error!(%e, name = %new_item.name, "failed to create new clothing item");
                 } else {
                     new_items_created += 1;
                     candidates.push(ClothingCandidate {
@@ -829,7 +829,7 @@ pub async fn sync_discord_for_user(
             let outfit_id = match outfit_row {
                 Ok((id,)) => id,
                 Err(e) => {
-                    eprintln!("Failed to insert outfit for {}: {e}", parsed.date);
+                    tracing::error!(%e, date = %parsed.date, "failed to insert outfit");
                     all_outfits_succeeded = false;
                     continue;
                 }
@@ -848,7 +848,7 @@ pub async fn sync_discord_for_user(
                 .execute(&mut *tx)
                 .await
                 {
-                    eprintln!("Failed to link outfit item: {e}");
+                    tracing::error!(%e, "failed to link outfit item");
                 }
             }
 
@@ -866,11 +866,11 @@ pub async fn sync_discord_for_user(
             .execute(&mut *tx)
             .await
             {
-                eprintln!("Failed to update wear counts: {e}");
+                tracing::error!(%e, "failed to update wear counts");
             }
 
             if let Err(e) = tx.commit().await {
-                eprintln!("Failed to commit outfit transaction: {e}");
+                tracing::error!(%e, "failed to commit outfit transaction");
                 all_outfits_succeeded = false;
                 continue;
             }

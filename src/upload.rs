@@ -330,7 +330,7 @@ pub fn encode_thumbnail(img: &image::RgbaImage, width: u32) -> Option<Vec<u8>> {
         .is_ok();
     match encoded {
         false => {
-            eprintln!("thumbnail encode failed for {width}px image");
+            tracing::warn!(%width, "thumbnail encode failed");
             None
         }
         true => Some(out),

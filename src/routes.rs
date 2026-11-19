@@ -26,10 +26,11 @@ pub async fn list_tables(
     State(state): State<Arc<AppState>>,
     _auth: AuthUser,
 ) -> Json<Vec<ColumnInfo>> {
-    // One schema read serves the whole app: the tables tab used to pay its own JOIN over
-    // information_schema, the same questions the CRUD surface asked. Refreshing here keeps
-    // the listing honest after a migration while the CRUD endpoints keep paying none.
-    state.schema.refresh(&state.db).await;
+    // The listing is served from the startup snapshot; it is re-read only when
+    // it is older than the TTL, so a migration shows up within five minutes
+    // without an ordinary request ever paying for a schema read.
+    const SCHEMA_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    state.schema.refresh_if_stale(&state.db, SCHEMA_TTL).await;
 
     let facts_list = state.schema.snapshot();
     let mut rows: Vec<ColumnInfo> = vec![];
@@ -76,10 +77,20 @@ fn db_write_error(error: SqlxError) -> (StatusCode, String) {
             );
         }
     }
-    eprintln!("database write failed: {error}");
+    tracing::error!(%error, "database write failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         "database write failed".into(),
+    )
+}
+
+/// Read-path sibling of `db_write_error`: a database failure on a read answers
+/// a mapped 500 (and a log line) instead of panicking the request task.
+fn db_read_error(error: SqlxError) -> (StatusCode, String) {
+    tracing::error!(%error, "database read failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "database read failed".into(),
     )
 }
 
@@ -157,13 +168,13 @@ pub async fn get_table_rows(
                     .bind(offset)
                     .fetch_all(&state.db)
                     .await
-                    .unwrap(),
+                    .map_err(db_read_error)?,
                 false => sqlx::query(&found.shared_rows_sql)
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(&state.db)
                     .await
-                    .unwrap(),
+                    .map_err(db_read_error)?,
             };
 
             let total: i64 = match rows.first() {
@@ -288,14 +299,14 @@ pub async fn delete_table_row(
                 .bind(user_id)
                 .fetch_optional(&state.db)
                 .await
-                .unwrap(),
+                .map_err(db_read_error)?,
         },
         _ => sqlx::query_as(&found.delete_sql)
             .bind(id)
             .bind(user_id)
             .fetch_optional(&state.db)
             .await
-            .unwrap(),
+            .map_err(db_read_error)?,
     };
 
     Ok(Json(row.map(|t| t.0)))
@@ -385,6 +396,25 @@ pub async fn update_table_row(
     };
 
     Ok(Json(row.map(|t| t.0)))
+}
+
+/// Liveness/readiness probe: answers 200 only when the database pool can
+/// actually run a statement, so a tunnel health check distinguishes "the
+/// process is up" from "the process is up and the database is reachable".
+pub async fn healthz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))),
+        Err(e) => {
+            tracing::error!(%e, "health check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "status": "degraded" })),
+            )
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -536,7 +566,7 @@ pub async fn list_outfits(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
     Query(params): Query<HashMap<String, String>>,
-) -> (axum::http::HeaderMap, Json<Vec<JsonValue>>) {
+) -> Result<(axum::http::HeaderMap, Json<Vec<JsonValue>>), (StatusCode, String)> {
     // Paging and the total in one statement: `COUNT(*) OVER ()` counts the rows the
     // filter matched before the page is cut, so the completeness signal costs no second
     // pass over the join that builds the ids, and a client may ask to start anywhere.
@@ -561,19 +591,19 @@ pub async fn list_outfits(
         .bind(offset)
         .fetch_all(&state.db)
         .await
-        .unwrap();
+        .map_err(db_read_error)?;
 
     let total: i64 = match rows.first() {
         None => 0,
         Some(row) => row.get::<i64, _>("total"),
     };
 
-    with_total_count(
+    Ok(with_total_count(
         total,
         rows.into_iter()
             .map(|r| r.get::<JsonValue, _>("row"))
             .collect(),
-    )
+    ))
 }
 
 pub async fn create_outfit(
@@ -898,7 +928,7 @@ pub async fn get_user_settings(
                     (true, Some(hint), ref_path, provider, qwen_url, disc_id)
                 }
                 Err(e) => {
-                    eprintln!("Failed to decrypt API key for user {user_id}: {e}");
+                    tracing::error!(%e, %user_id, "failed to decrypt API key");
                     (false, None, ref_path, provider, qwen_url, disc_id)
                 }
             }
@@ -1645,7 +1675,7 @@ pub async fn generate_outfit_preview(
     for (thumb_width, thumb_bytes) in thumbs {
         let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
         if let Err(e) = state.storage.upload_file(&thumb_key, thumb_bytes).await {
-            eprintln!("thumbnail store failed for {thumb_key}: {e}")
+            tracing::warn!(%e, thumb_key = %thumb_key, "thumbnail store failed")
         };
     }
 
@@ -1825,7 +1855,7 @@ pub async fn upload_file(
     for (thumb_width, thumb_bytes) in thumbs {
         let thumb_key = crate::upload::thumb_storage_key(&key, thumb_width);
         if let Err(e) = storage.upload_file(&thumb_key, thumb_bytes).await {
-            eprintln!("thumbnail store failed for {thumb_key}: {e}")
+            tracing::warn!(%e, thumb_key = %thumb_key, "thumbnail store failed")
         };
     }
 
@@ -2025,7 +2055,7 @@ async fn served_from_original(
         for (thumb_width, thumb_bytes) in crate::upload::thumbs_from_stored(&data) {
             let thumb_key = crate::upload::thumb_storage_key(path, thumb_width);
             if let Err(e) = state.storage.upload_file(&thumb_key, thumb_bytes).await {
-                eprintln!("thumbnail store failed for {thumb_key}: {e}")
+                tracing::warn!(%e, thumb_key = %thumb_key, "thumbnail store failed")
             };
         }
     };

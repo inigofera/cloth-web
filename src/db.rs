@@ -221,6 +221,9 @@ pub struct SchemaSnapshot {
     // Tables in schema order, for the `GET /db` listing.
     pub listing: Vec<TableFacts>,
     pub unknown: HashMap<String, bool>,
+    // When the last successful schema read happened; `None` until the first
+    // refresh, which forces `refresh_if_stale` to pay for one read.
+    pub last_refreshed: Option<std::time::Instant>,
 }
 
 impl SchemaSnapshot {
@@ -229,6 +232,7 @@ impl SchemaSnapshot {
             by_name: HashMap::new(),
             listing: vec![],
             unknown: HashMap::new(),
+            last_refreshed: None,
         }
     }
 }
@@ -253,7 +257,7 @@ impl SchemaCache {
             .fetch_all(pool)
             .await
             .unwrap_or_else(|error| {
-                eprintln!("db schema read error: {error}");
+                tracing::error!(%error, "db schema read failed");
                 vec![]
             });
 
@@ -294,7 +298,38 @@ impl SchemaCache {
         state.by_name = by_name;
         state.listing = listing;
         state.unknown = HashMap::new();
+        // Only a read that actually saw the schema counts as fresh: a failed
+        // read leaves the snapshot as it was and lets the next call retry.
+        if table_count > 0 {
+            state.last_refreshed = Some(std::time::Instant::now());
+        }
         table_count
+    }
+
+    // Refresh only when the snapshot is older than `ttl`. The startup warm-up
+    // and the `/tables` listing both funnel through this, so the per-request
+    // schema read the cache exists to eliminate comes back only after a
+    // migration or a longer-than-TTL idle - never on an ordinary request.
+    pub async fn refresh_if_stale(
+        &self,
+        pool: &sqlx::Pool<sqlx::Postgres>,
+        ttl: std::time::Duration,
+    ) -> usize {
+        let stale = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match state.last_refreshed {
+                None => true,
+                Some(when) => when.elapsed() >= ttl,
+            }
+        };
+        if stale {
+            self.refresh(pool).await
+        } else {
+            0
+        }
     }
 
     // Facts for one table out of the snapshot, without touching the wire.

@@ -24,6 +24,7 @@ virtual try-on, backed by Supabase (Postgres + Storage).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/healthz` | GET | Unauthenticated liveness probe: 200 when the database answers, 503 otherwise |
 | `/tables` | GET | List public tables with columns and types |
 | `/db/:table` | GET / POST | Read rows (`?limit=`, `?offset=`; up to 10,000 rows; total reported via `X-Total-Count` header) / insert a row |
 | `/db/:table/:id` | PATCH / DELETE | Update / delete a row (user-scoped tables only) |
@@ -63,6 +64,7 @@ DISCORD_BOT_TOKEN            # Discord bot token (optional; enables Discord impo
 DISCORD_CHANNEL_ID           # Discord channel to import outfits from (optional)
 DISCORD_CREATOR_ID           # Discord user id auto-linked on first message (optional)
 DISCORD_DEFAULT_USER_ID      # app user id the startup sweep imports for (optional)
+RUST_LOG                     # tracing filter, e.g. "info" or "backend=debug" (default: info)
 ```
 
 Frontend (`frontend/.env`):
