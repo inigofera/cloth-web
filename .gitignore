@@ -27,3 +27,6 @@ local_inference/*.dylib
 local_inference/*.txt
 !local_inference/requirements.txt
 local_inference/local_inference/
+
+# Local readiness/progress report (kept out of the repo)
+/V1.0_READINESS.md
