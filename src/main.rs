@@ -3,10 +3,14 @@ mod cache;
 mod crypto;
 mod db;
 mod discord;
+mod ratelimit;
 mod routes;
 mod storage;
 mod upload;
 
+use axum::http::Request;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::serve;
 use axum::{
     extract::DefaultBodyLimit,
@@ -19,8 +23,8 @@ use routes::{
     create_category, create_color, create_outfit, create_subcategory, delete_outfit,
     delete_table_row, generate_discord_link_code, generate_outfit_preview, get_table_rows,
     get_user_settings, insert_table_row, list_outfits, list_tables, serve_file,
-    sync_discord_outfits, test_qwen_connection, unlink_discord_account, update_table_row,
-    update_user_settings, upload_file,
+    sign_file_token_request, sync_discord_outfits, test_qwen_connection, unlink_discord_account,
+    update_table_row, update_user_settings, upload_file,
 };
 use std::sync::Arc;
 use storage::SupabaseStorage;
@@ -31,11 +35,25 @@ pub struct AppState {
     pub db: sqlx::Pool<sqlx::Postgres>,
     pub storage: SupabaseStorage,
     pub image_cache: Arc<cache::ImageCache>,
+    pub rate: Arc<ratelimit::RateLimiter>,
     // The shape of the public schema, read once at startup: the CRUD endpoints answer their
     // table questions from here rather than from information_schema per request.
     pub schema: Arc<db::SchemaCache>,
     pub jwt_secret: String,
+    // Supabase project URL: the `iss` claim every valid access token carries.
+    pub jwt_issuer: String,
     pub encryption_key: [u8; 32],
+}
+
+/// Hygiene headers on every response. The SPA itself is served by the tunnel
+/// or a static host, so its own headers (CSP, `no-cache` on the shell) are
+/// configured there; these cover everything the API answers.
+async fn security_headers(req: Request<axum::body::Body>, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    resp
 }
 
 #[tokio::main]
@@ -46,6 +64,7 @@ async fn main() {
     let storage = SupabaseStorage::new();
 
     let jwt_secret = std::env::var("SUPABASE_JWT_SECRET").expect("SUPABASE_JWT_SECRET not set");
+    let jwt_issuer = std::env::var("SUPABASE_URL").expect("SUPABASE_URL not set");
 
     let encryption_key_hex = std::env::var("SETTINGS_ENCRYPTION_KEY")
         .expect("SETTINGS_ENCRYPTION_KEY must be set in environment");
@@ -108,8 +127,10 @@ async fn main() {
         db,
         storage,
         image_cache: Arc::new(cache::ImageCache::new(512, 24 * 1024 * 1024)),
+        rate: Arc::new(ratelimit::RateLimiter::new()),
         schema,
         jwt_secret,
+        jwt_issuer,
         encryption_key,
     });
 
@@ -135,8 +156,11 @@ async fn main() {
         .route("/clothing-categories", post(create_category))
         .route("/clothing-subcategories", post(create_subcategory))
         .route("/upload", post(upload_file))
+        // Static segments win over the `/files/*path` wildcard below.
+        .route("/files/sign", get(sign_file_token_request))
         .route("/files/*path", get(serve_file))
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
 
     println!("🚀 running on http://localhost:3000");

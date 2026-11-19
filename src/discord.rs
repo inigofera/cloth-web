@@ -539,6 +539,24 @@ pub async fn sync_discord_for_user(
             .map(|w| w.eq_ignore_ascii_case("!link") || w.eq_ignore_ascii_case("/link"))
             .unwrap_or(false)
         {
+            // Brute-force lockout: after 5 failed `!link` attempts within the
+            // current lock window, this Discord user's link commands are
+            // ignored for one hour. The skip is silent on purpose - a reply
+            // would confirm the account's state to the attacker.
+            let locked = sqlx::query_scalar::<_, bool>(
+                r#"SELECT COALESCE(locked_until > now(), false)
+                   FROM public."discord-link-attempts"
+                   WHERE discord_user_id = $1"#,
+            )
+            .bind(&msg.author.id)
+            .fetch_optional(pool)
+            .await
+            .map(|row| row.unwrap_or(false))
+            .unwrap_or(false);
+            if locked {
+                continue;
+            }
+
             messages_processed += 1;
             if let Some(code) = words.get(1) {
                 let code_clean = code.trim();
@@ -557,11 +575,35 @@ pub async fn sync_discord_for_user(
 
                 match linked_user {
                     Ok(Some(uid)) => {
+                        // A successful link clears any prior failed attempts.
+                        let _ = sqlx::query(
+                            r#"DELETE FROM public."discord-link-attempts"
+                               WHERE discord_user_id = $1"#,
+                        )
+                        .bind(&msg.author.id)
+                        .execute(pool)
+                        .await;
                         let _ = discord.add_reaction(&msg.id, "✅").await;
                         let reply = format!("✅ **Successfully connected!** Your Discord account (@{}) is now paired with your Cloth Web wardrobe (`{uid}`). You can now send your daily outfits here!", msg.author.username);
                         let _ = discord.send_reply(&msg.id, &reply).await;
                     }
                     Ok(None) => {
+                        // Count the failure; the 5th one locks the user out for
+                        // an hour.
+                        let _ = sqlx::query(
+                            r#"INSERT INTO public."discord-link-attempts" (discord_user_id, fail_count, locked_until)
+                               VALUES ($1, 1, NULL)
+                               ON CONFLICT (discord_user_id) DO UPDATE SET
+                                   fail_count = "discord-link-attempts".fail_count + 1,
+                                   locked_until = CASE
+                                       WHEN "discord-link-attempts".fail_count + 1 >= 5
+                                       THEN now() + interval '1 hour'
+                                       ELSE "discord-link-attempts".locked_until
+                                   END"#,
+                        )
+                        .bind(&msg.author.id)
+                        .execute(pool)
+                        .await;
                         let _ = discord.add_reaction(&msg.id, "❌").await;
                         let reply = "❌ **Invalid or expired link code.** Please generate a new 6-digit code in Cloth Web Settings.".to_string();
                         let _ = discord.send_reply(&msg.id, &reply).await;

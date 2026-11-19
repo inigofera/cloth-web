@@ -2,9 +2,11 @@
 """Import a cloth export JSON into the Supabase database.
 
 Usage:
-  python3 scripts/import_export.py               # dry run: report + write SQL file
-  python3 scripts/import_export.py --execute     # additionally run the SQL via psql
-  python3 scripts/import_export.py --user <uuid> # override target user
+  python3 scripts/import_export.py --user <uuid>         # dry run: report + write SQL file
+  python3 scripts/import_export.py --user <uuid> --execute  # additionally run the SQL via psql
+
+The target user UUID is required: pass --user or set CLOTHWEB_USER in the
+environment. There is no built-in default on purpose.
 
 The generated SQL is a single transaction, idempotent (safe to re-run), and
 preserves the export's UUIDs.
@@ -21,7 +23,7 @@ import uuid
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXPORT_FILE = os.path.join(REPO_ROOT, "cloth_export_1789763982199.json")
 SQL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "import_export.generated.sql")
-DEFAULT_USER = "a64f5034-b30c-4f19-8acc-6812f74929ff"  # inigofera@proton.me
+DEFAULT_USER = os.environ.get("CLOTHWEB_USER", "")
 
 # raw category -> normalized category
 CATEGORY_MAP = {
@@ -245,6 +247,8 @@ def main():
     args = parser.parse_args()
 
     user_id = args.user
+    if not user_id:
+        parser.error("--user (or CLOTHWEB_USER) is required")
     uuid.UUID(user_id)
 
     env = load_env()

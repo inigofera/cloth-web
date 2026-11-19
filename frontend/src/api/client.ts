@@ -21,8 +21,29 @@ const STORAGE_BUCKET = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'clot
 
 let accessToken: string | null = null;
 
+// Short-lived signed token for image URLs (from `GET /files/sign`). Image tags
+// cannot carry auth headers, and putting the JWT in a URL would leak it into
+// access logs, so `<img>` srcs use this 10-minute HMAC token instead.
+let fileToken: { token: string; expires_at: number } | null = null;
+
+async function fetchFileToken(): Promise<void> {
+  let { data } = await supabase.auth.getSession();
+  const headers = new Headers();
+  if (data.session) headers.set('Authorization', `Bearer ${data.session.access_token}`);
+  const res = await fetch(`${API_BASE}/files/sign`, { headers });
+  if (!res.ok) return;
+  const body = (await res.json().catch(() => null)) as
+    | { token: string; expires_at: number }
+    | null;
+  if (body && typeof body.token === 'string' && typeof body.expires_at === 'number') {
+    fileToken = body;
+  }
+}
+
 function syncToken(session: { access_token: string } | null): void {
   accessToken = session?.access_token ?? null;
+  fileToken = null;
+  if (accessToken) void fetchFileToken();
 }
 
 supabase.auth.getSession().then(({ data }) => syncToken(data.session));
@@ -52,7 +73,16 @@ export function imageUrl(path: string | null | undefined, opts?: ImageUrlOptions
   if (!isValidObjectPath(objectPath)) return null;
   const params = new URLSearchParams();
   if (opts?.width) params.set('width', String(opts.width));
-  if (accessToken) params.set('token', accessToken);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (fileToken) {
+    if (fileToken.expires_at > nowSec + 30) {
+      params.set('token', fileToken.token);
+      params.set('exp', String(fileToken.expires_at));
+    } else {
+      // Refresh in the background; the next render picks up the fresh token.
+      void fetchFileToken();
+    }
+  }
   const qs = params.toString();
   return `${API_BASE}/files/${objectPath}${qs ? `?${qs}` : ''}`;
 }

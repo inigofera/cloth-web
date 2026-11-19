@@ -39,7 +39,8 @@ virtual try-on, backed by Supabase (Postgres + Storage).
 | `/settings/discord-code` | POST | Generate a Discord account link code |
 | `/settings/discord-unlink` | POST | Unlink the Discord account |
 | `/upload` | POST | Upload an image to Supabase Storage, returns public URL |
-| `/files/*path` | GET | Serve the user's own stored images, with optional `?width=` resizing (capped at 4096px) |
+| `/files/sign` | GET | Issue the caller a short-lived (10 min) signed token for referencing their own images from `<img>` tags |
+| `/files/*path` | GET | Serve the user's own stored images, with optional `?width=` resizing (capped at 4096px). Auth via Bearer JWT, or `?token=<signed>&exp=<unix>` from `/files/sign` — JWTs are never placed in URLs |
 
 Tables with a `user_id` column are scoped to the authenticated user; tables without one are shared reference data (read-only). The `user-settings` table is explicitly blocked from the generic `/db/:table` endpoints and only reachable through `/settings`.
 
@@ -94,7 +95,7 @@ Generated images pass through the same sanitization/normalization pipeline as up
 
 ## Discord integration (optional)
 
-With a bot token and channel configured, users can link their Discord account in Settings (one-time link code) and import outfit logs posted in the channel. A startup sweep also imports any new messages.
+With a bot token and channel configured, users can link their Discord account in Settings (6-digit code, valid 15 minutes) and import outfit logs posted in the channel. After five failed `!link` attempts a Discord user is locked out of the link flow for one hour. A startup sweep also imports any new messages.
 
 ## Database migrations
 
@@ -107,6 +108,7 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 | `20261018000001_add_tryon_provider_columns.sql` | try-on provider + local Qwen URL columns |
 | `20261026000000_add_discord_integration.sql` | Discord link columns on `user-settings` |
 | `20261105000000_index_user_scoped_tables.sql` | `(user_id)` and `(user_id, created_at DESC)` indexes on all user-scoped tables |
+| `20261119000000_discord_link_rate_limit.sql` | `discord-link-attempts` table: failed `!link` counts and 1-hour lockout (blocked from the generic API) |
 
 ## Build and run
 

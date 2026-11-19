@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::AuthUser;
+use crate::auth::{sign_file_token, unix_now, AuthUser, FileAuth, FILE_TOKEN_TTL_SECS};
 use crate::cache::CachedImage;
 use crate::AppState;
 
@@ -49,8 +49,13 @@ pub async fn list_tables(
     Json(rows)
 }
 
+/// Tables hidden from the generic table API and the `/tables` listing.
+/// `user-settings` is only reachable through `/settings`;
+/// `discord-link-attempts` is internal rate-limiting bookkeeping that must
+/// never be readable through the generic API (it names Discord users that are
+/// locked out of the link flow).
 pub fn is_generic_crud_table_blocked(table: &str) -> bool {
-    table == "user-settings"
+    matches!(table, "user-settings" | "discord-link-attempts")
 }
 
 // The questions the CRUD surface used to ask Postgres per request - does this table exist,
@@ -1026,8 +1031,11 @@ pub async fn generate_discord_link_code(
     State(state): State<Arc<AppState>>,
     AuthUser(user_id): AuthUser,
 ) -> Result<Json<DiscordLinkCodeResponse>, (StatusCode, String)> {
+    use rand::rngs::OsRng;
     use rand::Rng;
-    let code: u32 = rand::thread_rng().gen_range(100000..999999);
+    // OsRng: the code is an unguessable 15-minute secret, so it comes from the
+    // OS, not a thread-local PRNG.
+    let code: u32 = OsRng.gen_range(100000..999999);
     let code_str = code.to_string();
 
     sqlx::query(
@@ -1198,6 +1206,19 @@ pub async fn generate_outfit_preview(
         return Err((
             StatusCode::BAD_REQUEST,
             "item_ids must contain between 1 and 8 items".to_string(),
+        ));
+    }
+
+    // A generation spends 10-60 s of GPU time or the user's Gemini quota; cap
+    // it per user per minute so a stuck client cannot burn the budget.
+    if !state.rate.allow(
+        &format!("tryon:{user_id}"),
+        5,
+        std::time::Duration::from_secs(60),
+    ) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many try-on generations right now, please slow down".to_string(),
         ));
     }
 
@@ -1722,6 +1743,19 @@ pub async fn upload_file(
     AuthUser(user_id): AuthUser,
     mut multipart: Multipart,
 ) -> Result<Json<String>, (StatusCode, String)> {
+    // Per-user cap: each upload decodes and re-encodes a large image, so a
+    // burst of them is the most expensive thing this endpoint can do.
+    if !state.rate.allow(
+        &format!("upload:{user_id}"),
+        30,
+        std::time::Duration::from_secs(60),
+    ) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many uploads right now, please slow down".to_string(),
+        ));
+    }
+
     let storage = &state.storage;
 
     let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -1886,6 +1920,21 @@ fn validate_image_path(value: &JsonValue, user_id: &Uuid) -> Result<(), (StatusC
     Ok(())
 }
 
+/// Issue the caller a short-lived token for referencing their own images from
+/// `<img>` tags (which cannot carry auth headers). The returned `token` plus
+/// `expires_at` are what `imageUrl()` puts in the query string; the JWT
+/// itself never ends up in a URL.
+pub async fn sign_file_token_request(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Json<serde_json::Value> {
+    let exp = unix_now() + FILE_TOKEN_TTL_SECS;
+    Json(serde_json::json!({
+        "token": sign_file_token(&state.encryption_key, &user_id, exp),
+        "expires_at": exp,
+    }))
+}
+
 /// Cache key for a `/files` response: the object path plus the *effective*
 /// width. The width belongs in the key because they are different responses —
 /// without it, a cached `?width=480` thumbnail could answer a later request for
@@ -2008,7 +2057,9 @@ async fn served_from_original(
 
 pub async fn serve_file(
     State(state): State<Arc<AppState>>,
-    AuthUser(user_id): AuthUser,
+    // FileAuth accepts the Bearer JWT or the short-lived signed token from
+    // `/files/sign` (see auth.rs) - never a JWT in the query string.
+    FileAuth(user_id): FileAuth,
     Path(path): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, (StatusCode, String)> {
