@@ -30,11 +30,11 @@ BEGIN
 
     IF NOT EXISTS (
       SELECT 1
-      FROM information_schema.indices
-      WHERE table_schema = 'public'
-        AND name = index_name
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname = index_name
     ) THEN
-      EXECUTE format('CREATE INDEX %1I ON public.%1I (user_id)', candidate);
+      EXECUTE format('CREATE INDEX %1I ON public.%2I (user_id)', index_name, candidate);
     END IF;
 
     IF EXISTS (
@@ -48,11 +48,11 @@ BEGIN
 
       IF NOT EXISTS (
         SELECT 1
-        FROM information_schema.indices
-        WHERE table_schema = 'public'
-          AND name = index_name
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = index_name
       ) THEN
-        EXECUTE format('CREATE INDEX %1I ON public.%1I (user_id, created_at DESC NULLS LAST)', candidate);
+        EXECUTE format('CREATE INDEX %1I ON public.%2I (user_id, created_at DESC NULLS LAST)', index_name, candidate);
       END IF;
     END IF;
   END LOOP;

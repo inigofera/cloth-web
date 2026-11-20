@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { createWardrobeStore, type WardrobeClient } from './wardrobe';
 import type { ClothingItem, Outfit } from '../api/types';
 
+// Every test injects its own client, so the real API module (and the
+// Supabase client it constructs, which needs build-time env) is stubbed out.
+vi.mock('../api/client', () => ({ api: {} }));
+
 function clothingItem(id: string, overrides: Partial<ClothingItem> = {}): ClothingItem {
   return {
     id,

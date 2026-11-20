@@ -625,26 +625,45 @@ pub async fn create_outfit(
         ));
     }
 
-    let mut item_literals: Vec<String> = vec![];
+    let mut item_uuids: Vec<Uuid> = vec![];
     for raw_id in &req.item_ids {
         match Uuid::parse_str(raw_id) {
             Err(_) => return Err((StatusCode::BAD_REQUEST, "item id is not a uuid".to_string())),
             Ok(item_uuid) => {
-                if !item_literals
-                    .iter()
-                    .any(|seen| *seen == item_uuid.to_string())
-                {
-                    item_literals.push(item_uuid.to_string());
+                if !item_uuids.contains(&item_uuid) {
+                    item_uuids.push(item_uuid);
                 }
             }
         }
     }
+    let item_literals: Vec<String> = item_uuids.iter().map(|u| u.to_string()).collect();
 
     let mut tx = state
         .db
         .begin()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Ownership gate, run before anything is written: an outfit may only link
+    // garments the caller owns, so a client cannot pin another user's items into
+    // their own outfit. A mismatched count means at least one named item is not
+    // the caller's (or does not exist), and the whole request is refused.
+    if !item_uuids.is_empty() {
+        let owned: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM \"clothing-items\" WHERE user_id = $1 AND id = ANY($2::uuid[])",
+        )
+        .bind(user_id)
+        .bind(&item_uuids)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if owned.0 != item_uuids.len() as i64 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "every item in an outfit must belong to you".to_string(),
+            ));
+        }
+    }
 
     let row: (JsonValue,) = sqlx::query_as(
         "INSERT INTO outfits (user_id, date, notes, image_path, is_active, created_at, updated_at) VALUES ($1, $2::timestamptz, $3, $4, true, now(), now()) RETURNING to_jsonb(outfits) AS row",
@@ -702,7 +721,9 @@ pub async fn create_outfit(
     // The outfit the caller gets back is read from inside the same transaction that made it,
     // so the links above are already visible to it; no second round trip after the commit,
     // and no window where the outfit exists but its items do not.
-    let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2");
+    // `o.id` is uuid but `outfit_id` came out of JSON as a string: the cast keeps the
+    // comparison typed (the link insert above uses the same trick).
+    let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2::uuid");
     let created: (JsonValue,) = sqlx::query_as(&created_sql)
         .bind(user_id)
         .bind(&outfit_id)

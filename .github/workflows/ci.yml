@@ -18,6 +18,23 @@ env:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # Disposable database for the integration suite: it resets `public` and
+    # `auth` and applies the whole migration chain, so it must be a throwaway
+    # database that the tests own.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: cloth_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v5
 
@@ -34,6 +51,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
+        env:
+          CLOTHWEB_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/cloth_test
         run: cargo test
 
       - name: Build (release)

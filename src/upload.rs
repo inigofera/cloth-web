@@ -3,9 +3,7 @@
 //! Client filenames are untrusted input: they may contain path traversal,
 //! unsafe characters, or collide with another user's upload. Everything that
 //! reaches Supabase Storage is therefore rewritten into a safe, per-user
-//! object key of the form:
-//!
-//!     users/{user_id}/{uuid}-{sanitized_name}
+//! object key of the form `users/{user_id}/{uuid}-{sanitized_name}`.
 
 use axum::http::StatusCode;
 use std::fmt;

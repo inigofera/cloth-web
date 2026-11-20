@@ -27,3 +27,7 @@ futures = "0.3"
 strsim = "0.11.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the router in the integration tests.
+tower = { version = "0.4", features = ["util"] }

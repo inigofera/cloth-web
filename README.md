@@ -105,6 +105,7 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 
 | Migration | What it does |
 |-----------|--------------|
+| `20251001000000_base_schema.sql` | the seven core tables (clothing items, outfits + links, reference tables, brands) with RLS — bootstraps a fresh project; sorts before the rest |
 | `20260922000000_constrain_clothing_item_select_fields.sql` | CHECK constraints on `origin` and `laundry_impact` |
 | `20261018000000_create_user_settings.sql` | `user-settings` table (encrypted API key, reference photo) with RLS |
 | `20261018000001_add_tryon_provider_columns.sql` | try-on provider + local Qwen URL columns |
@@ -132,4 +133,5 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 ## Testing
 
 - **Backend** (`cargo test`): unit tests covering filename sanitization, magic-byte sniffing, per-user storage keys and path authorization, AES-256-GCM round-trips, SSRF URL validation, image cache, and Discord message parsing.
-- **Frontend** (`npm test`): Vitest suites for date/timezone handling, error classification, routing, sanitizers, the undo manager, insights metrics, layout persistence, widget smoke tests, and picker recency ordering.
+- **Backend integration** (`cargo test --test integration`): the real router against a real Postgres — the full migration chain applied to a clean schema, Supabase Storage mocked in-process. Covers auth rejections, generic CRUD scoping, outfit lifecycle, settings encryption, the signed file-token flow, upload validation, rate limiting and paging. Skipped automatically when no test database is reachable; point it at one with `CLOTHWEB_TEST_DATABASE_URL` (CI provides a disposable `cloth_test` database via a service container).
+- **Frontend** (`npm test`): Vitest suites for date/timezone handling, error classification, routing, sanitizers, the undo manager, insights metrics, layout persistence, widget smoke tests, picker recency ordering, and the signed-image URL client.

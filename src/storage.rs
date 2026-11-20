@@ -11,10 +11,20 @@ pub struct SupabaseStorage {
 
 impl SupabaseStorage {
     pub fn new() -> Self {
+        Self::with(
+            env::var("SUPABASE_URL").unwrap(),
+            env::var("SUPABASE_SERVICE_ROLE_KEY").unwrap(),
+            env::var("SUPABASE_STORAGE_BUCKET").unwrap(),
+        )
+    }
+
+    /// Explicit-construction sibling of `new()`, used by the integration
+    /// tests to point the app at an in-process storage mock.
+    pub fn with(base_url: String, api_key: String, bucket: String) -> Self {
         Self {
-            base_url: env::var("SUPABASE_URL").unwrap(),
-            api_key: env::var("SUPABASE_SERVICE_ROLE_KEY").unwrap(),
-            bucket: env::var("SUPABASE_STORAGE_BUCKET").unwrap(),
+            base_url,
+            api_key,
+            bucket,
             client: Client::new(),
         }
     }
@@ -76,5 +86,11 @@ impl SupabaseStorage {
         } else {
             Err(anyhow::anyhow!("download failed: {:?}", res.text().await?))
         }
+    }
+}
+
+impl Default for SupabaseStorage {
+    fn default() -> Self {
+        Self::new()
     }
 }

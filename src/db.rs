@@ -420,6 +420,12 @@ impl SchemaCache {
     }
 }
 
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 pub mod schema_tests {
     use super::facts_for;
