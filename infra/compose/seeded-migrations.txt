@@ -1,0 +1,17 @@
+# Migrations already applied to the live Supabase database, as of the first
+# migrate.sh run. The app has been running the full M5 codebase on the old
+# server, so the live schema should already include every migration below;
+# seeding the ledger with all of them makes the first run a no-op.
+#
+# If one of these turns out NOT to be applied (e.g. a later migration was
+# skipped during manual rollout), remove its line and re-run migrate.sh.
+# One migration per line (basename without .sql). # starts a comment.
+
+20251001000000_base_schema
+20260922000000_constrain_clothing_item_select_fields
+20261018000000_create_user_settings
+20261018000001_add_tryon_provider_columns
+20261026000000_add_discord_integration
+20261105000000_index_user_scoped_tables
+20261119000000_discord_link_rate_limit
+20261123000000_scope_reference_data

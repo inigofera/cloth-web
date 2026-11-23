@@ -1,5 +1,16 @@
 # Home Infrastructure Plan: GitHub Pages frontend + inibaby backend
 
+**Status (M6):** Phase 1 (code) and `infra/compose/` (Phase 2's tooling) are
+implemented — CORS middleware + tests, `VITE_API_BASE_URL`, Dockerfile, CI
+`image`/`pages` jobs, compose file, `migrate.sh` with the `schema_migrations`
+ledger, `deploy.sh`, `backup.sh`. The machine-side work is a runbook, not yet
+executed: see **`infra/compose/README.md`** (tunnel, CNAMEs, `.env`, first
+migration run, backups, uptime monitor, Discord token rotation, cutover).
+Two deliberate deviations from this plan: CORS is hand-rolled middleware
+instead of `axum-cors` (the registry's `axum_cors` is an unrelated,
+incompatible crate), and `Access-Control-Expose-Headers: X-Total-Count` was
+added (the SPA reads that header cross-origin — the plan omitted it).
+
 **Goal:** serve the frontend from GitHub Pages under the domain `inigoartolozaga.com`, and run the
 Dockerized backend on the home NUC (`inibaby`), exposed securely to the internet.
 

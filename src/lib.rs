@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod cors;
 pub mod crypto;
 pub mod db;
 pub mod discord;
@@ -41,6 +42,9 @@ pub struct AppState {
     // Gemini REST base (`.../v1beta`). Overridable so the integration tests can
     // point try-on at an in-process mock; production keeps the real endpoint.
     pub gemini_api_base: String,
+    // Cross-origin allowlist for the split Pages/tunnel deployment (exact
+    // origins from CORS_ALLOWED_ORIGINS). Empty = same-origin only.
+    pub cors: cors::CorsAllowlist,
 }
 
 /// Hygiene headers on every response. The SPA itself is served by the tunnel
@@ -127,5 +131,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_log))
+        // Outermost layer: a preflight OPTIONS must be answered with 204
+        // before the request can reach the JWT extractors or the handlers.
+        .layer(axum::middleware::from_fn_with_state(
+            state.cors.clone(),
+            cors::cors,
+        ))
         .with_state(state)
 }

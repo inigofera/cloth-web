@@ -84,6 +84,16 @@ async fn main() {
     let schema = Arc::new(db::SchemaCache::new());
     schema.refresh(&db).await;
 
+    // Exact origins the browser is allowed to read the API from. The NUC's
+    // .env sets this for the split Pages/tunnel deployment; empty keeps the
+    // legacy same-origin behavior (no CORS headers at all).
+    let cors_allowlist = backend::cors::CorsAllowlist::from_env();
+    if cors_allowlist.0.is_empty() {
+        tracing::warn!("CORS_ALLOWED_ORIGINS is not set: cross-origin browsers will be blocked");
+    } else {
+        tracing::info!(allowed = ?cors_allowlist.0, "cors allowlist");
+    }
+
     let state = Arc::new(AppState {
         db,
         storage,
@@ -97,6 +107,7 @@ async fn main() {
         // integration suite can run try-on against a local mock.
         gemini_api_base: std::env::var("GEMINI_API_BASE")
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string()),
+        cors: cors_allowlist,
     });
 
     let app = build_router(state);

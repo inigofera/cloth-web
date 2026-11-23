@@ -1,6 +1,9 @@
 .env
 /target/
 node_modules/
+
+# inibaby production env (template is .env.example)
+infra/compose/.env
 cloth_export_*.json
 scripts/*.generated.sql
 *outfits*.txt

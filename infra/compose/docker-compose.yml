@@ -1,0 +1,20 @@
+# inibaby backend service (plan §1.6). The only exposed port is loopback:
+# the Cloudflare Tunnel connects to 127.0.0.1:3000, so no inbound firewall
+# rules exist and nothing listens on the LAN either.
+#
+# All configuration comes from .env in this directory (see .env.example).
+# CORS_ALLOWED_ORIGINS lives there too, so prod and any future staging stay
+# distinct without touching this file.
+
+services:
+  backend:
+    image: ghcr.io/inigofera/cloth-web-backend:${CLOTHWEB_TAG:-latest}
+    container_name: cloth-web-backend
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      retries: 3

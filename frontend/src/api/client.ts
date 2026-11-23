@@ -21,7 +21,11 @@ import type {
 import { supabase } from '../lib/supabase';
 import { isValidObjectPath } from '../lib/sanitize';
 
-const API_BASE = '/api';
+// Dev (`vite dev`) leaves this unset, so `/api` hits the Vite proxy. The
+// Pages build sets `VITE_API_BASE_URL` to the tunnel's public hostname
+// (`https://api.inigoartolozaga.com`), so the cross-origin SPA talks to the
+// API directly.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string) || '/api';
 const STORAGE_BUCKET = (import.meta.env.VITE_SUPABASE_BUCKET as string) || 'clothing-wardrobe';
 
 let accessToken: string | null = null;

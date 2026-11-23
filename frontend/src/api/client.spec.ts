@@ -136,3 +136,26 @@ describe('imageUrl', () => {
     expect(imageUrl(storageUrl)).toBe(`/api/files/${PATH}?token=SIG&exp=${exp}`);
   });
 });
+
+describe('API base URL', () => {
+  // The base is read from `import.meta.env` at module load, so each case
+  // re-imports a fresh module after setting (or clearing) the variable.
+  afterEach(() => {
+    delete import.meta.env.VITE_API_BASE_URL;
+    vi.resetModules();
+  });
+
+  it('defaults to the same-origin /api path in dev (Vite proxy)', async () => {
+    delete import.meta.env.VITE_API_BASE_URL;
+    vi.resetModules();
+    const { imageUrl } = await import('./client');
+    expect(imageUrl(PATH)).toBe(`/api/files/${PATH}`);
+  });
+
+  it('uses VITE_API_BASE_URL when set (Pages deployment)', async () => {
+    import.meta.env.VITE_API_BASE_URL = 'https://api.inigoartolozaga.com';
+    vi.resetModules();
+    const { imageUrl } = await import('./client');
+    expect(imageUrl(PATH)).toBe(`https://api.inigoartolozaga.com/files/${PATH}`);
+  });
+});

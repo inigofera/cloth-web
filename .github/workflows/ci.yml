@@ -14,6 +14,9 @@ env:
   VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || 'https://ci-placeholder.supabase.co' }}
   VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY || 'ci-placeholder-key' }}
   VITE_SUPABASE_BUCKET: ${{ secrets.VITE_SUPABASE_BUCKET || 'clothing-wardrobe' }}
+  # Public API origin inlined into the Pages bundle (plan §1.1/§3.3): a plain
+  # value, not a secret — the API carries no secrets in its URL.
+  VITE_API_BASE_URL: https://api.inigoartolozaga.com
 
 jobs:
   backend:
@@ -121,6 +124,77 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist
+
+  image:
+    # GHCR image for inibaby (plan §0.3/§1.5): the NUC never compiles Rust,
+    # it just `docker pull`s. Runs on push to main only.
+    needs: backend
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # SHA tag = roll back to any past commit; `latest` = inibaby's
+          # compose-file default.
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cloth-web-backend:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/cloth-web-backend:latest
+          cache-from: type=gha,scope=build
+          cache-to: type=gha,mode=max,scope=build
+
+  pages:
+    # Frontend → GitHub Pages (plan §1.5). Rebuilds here instead of reusing
+    # the frontend job's artifact (1.5a) to keep the jobs independent.
+    # Requires repo Settings → Pages → Source: "GitHub Actions" first.
+    needs: frontend
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write # OIDC deployment — no deploy key to store
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        # VITE_API_BASE_URL (workflow env above) points the SPA at the
+        # tunnel's public hostname; VITE_SUPABASE_* come from the same block.
+        working-directory: frontend
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+      - uses: actions/deploy-pages@v4
+        id: deploy
 
   e2e:
     runs-on: ubuntu-latest

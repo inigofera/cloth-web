@@ -25,7 +25,7 @@ use tower::util::ServiceExt;
 use uuid::Uuid;
 
 use backend::{
-    build_router, cache::ImageCache, db::SchemaCache, ratelimit::RateLimiter,
+    build_router, cache::ImageCache, cors::CorsAllowlist, db::SchemaCache, ratelimit::RateLimiter,
     storage::SupabaseStorage, AppState,
 };
 
@@ -372,6 +372,9 @@ async fn app() -> Option<TestApp> {
                 // The handler appends `/models/...` to the base; production's
                 // base ends in `/v1beta`, so the test mirror it.
                 gemini_api_base: format!("{gemini_url}/v1beta"),
+                // A non-empty allowlist so the CORS wiring on the real router
+                // is exercised (preflight must not require auth).
+                cors: CorsAllowlist(vec!["https://cloth.test.example".to_string()]),
             });
 
             TestApp {
@@ -501,6 +504,54 @@ async fn healthz_reports_ok_and_sets_security_headers() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body, serde_json::json!({ "status": "ok" }));
+}
+
+async fn preflight_from_allowed_origin_succeeds_without_auth() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+
+    // Preflight against a route that requires auth: the CORS layer must
+    // answer before the JWT extractor can reject it.
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/outfits")
+        .header("origin", "https://cloth.test.example")
+        .header("access-control-request-method", "GET")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = call(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://cloth.test.example")
+    );
+    assert!(resp.headers().get("access-control-allow-methods").is_some());
+    assert!(resp.headers().get("access-control-allow-headers").is_some());
+    // Proof the handler never ran: the preflight body is empty.
+    assert!(body_bytes(resp).await.is_empty());
+}
+
+async fn preflight_from_disallowed_origin_gets_no_allow_header() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/outfits")
+        .header("origin", "https://evil.example")
+        .header("access-control-request-method", "GET")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = call(&app, req).await;
+    // The browser fails the preflight because no allow-origin header exists.
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
 }
 
 async fn every_response_carries_the_hygiene_headers() {
@@ -2881,6 +2932,14 @@ fn integration_suite() {
         scenario!("healthz", healthz_reports_ok_and_sets_security_headers());
         scenario!("headers", every_response_carries_the_hygiene_headers());
         scenario!("auth", rejects_unauthenticated_and_invalid_tokens());
+        scenario!(
+            "cors_preflight",
+            preflight_from_allowed_origin_succeeds_without_auth()
+        );
+        scenario!(
+            "cors_disallowed",
+            preflight_from_disallowed_origin_gets_no_allow_header()
+        );
         scenario!(
             "tables_listing",
             tables_listing_shares_the_schema_and_hides_blocked_tables()
