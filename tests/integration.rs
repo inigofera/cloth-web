@@ -342,7 +342,11 @@ async fn app() -> Option<TestApp> {
             files.sort();
             for path in &files {
                 let sql = std::fs::read_to_string(path).unwrap();
-                sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+                // Checked-in migration files: trusted content, not request data.
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
             }
 
             let store = MockStore::new();

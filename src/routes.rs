@@ -161,15 +161,18 @@ pub async fn get_table_rows(
             // rows that exist rather than the rows this page happens to include, and a
             // truncated page still tells the UI how much data was left out - without
             // scanning the same rows a second time for the total.
+            // The statement was rendered once at startup from the schema snapshot:
+            // identifiers come from information_schema metadata, quoted via
+            // quote_ident; no request data is ever spliced in (values are binds).
             let rows = match found.has_user_id {
-                true => sqlx::query(&found.scoped_rows_sql)
+                true => sqlx::query(sqlx::AssertSqlSafe(found.scoped_rows_sql.as_str()))
                     .bind(user_id)
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(&state.db)
                     .await
                     .map_err(db_read_error)?,
-                false => sqlx::query(&found.shared_rows_sql)
+                false => sqlx::query(sqlx::AssertSqlSafe(found.shared_rows_sql.as_str()))
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(&state.db)
@@ -245,7 +248,7 @@ pub async fn insert_table_row(
 
     // The statement shape per table was decided at startup, so this request sends one
     // statement: the row is read back from the same insert, not re-queried after it.
-    let row: Option<(JsonValue,)> = sqlx::query_as(&found.insert_sql)
+    let row: Option<(JsonValue,)> = sqlx::query_as(sqlx::AssertSqlSafe(found.insert_sql.as_str()))
         .bind(payload)
         .fetch_optional(&state.db)
         .await
@@ -294,14 +297,14 @@ pub async fn delete_table_row(
             // An id that is not a uuid cannot name a uuid-keyed row: the answer is no row,
             // the same answer a lookup that matched nothing used to give.
             Err(_) => None,
-            Ok(target) => sqlx::query_as(&found.delete_sql)
+            Ok(target) => sqlx::query_as(sqlx::AssertSqlSafe(found.delete_sql.as_str()))
                 .bind(target)
                 .bind(user_id)
                 .fetch_optional(&state.db)
                 .await
                 .map_err(db_read_error)?,
         },
-        _ => sqlx::query_as(&found.delete_sql)
+        _ => sqlx::query_as(sqlx::AssertSqlSafe(found.delete_sql.as_str()))
             .bind(id)
             .bind(user_id)
             .fetch_optional(&state.db)
@@ -378,7 +381,9 @@ pub async fn update_table_row(
     let row: Option<(JsonValue,)> = match found.id_kind.as_str() {
         "uuid" => match Uuid::parse_str(&id) {
             Err(_) => None,
-            Ok(target) => sqlx::query_as(&sql)
+            // Same audit as the list/insert/delete statements above: startup-rendered
+            // head/tail, column names from the snapshot, values as binds.
+            Ok(target) => sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(target)
                 .bind(payload)
                 .bind(user_id)
@@ -386,7 +391,7 @@ pub async fn update_table_row(
                 .await
                 .map_err(db_write_error)?,
         },
-        _ => sqlx::query_as(&sql)
+        _ => sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(id)
             .bind(payload)
             .bind(user_id)
@@ -585,7 +590,8 @@ pub async fn list_outfits(
     let sql = format!(
         "{OUTFITS_ROW_EXPR}, COUNT(*) OVER () AS total {OUTFITS_FROM_SCOPED} ORDER BY o.date LIMIT $2 OFFSET $3",
     );
-    let rows = sqlx::query(&sql)
+    // Static const fragments only; all values are binds.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(user_id)
         .bind(limit)
         .bind(offset)
@@ -694,7 +700,8 @@ pub async fn create_outfit(
             "INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES {}",
             pairs.join(", ")
         );
-        sqlx::query(&link_sql)
+        // `pairs` are literal `($n, $m)` bind placeholders in order.
+        sqlx::query(sqlx::AssertSqlSafe(link_sql.as_str()))
             .bind(&outfit_id)
             .execute(&mut *tx)
             .await
@@ -724,7 +731,7 @@ pub async fn create_outfit(
     // `o.id` is uuid but `outfit_id` came out of JSON as a string: the cast keeps the
     // comparison typed (the link insert above uses the same trick).
     let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2::uuid");
-    let created: (JsonValue,) = sqlx::query_as(&created_sql)
+    let created: (JsonValue,) = sqlx::query_as(sqlx::AssertSqlSafe(created_sql.as_str()))
         .bind(user_id)
         .bind(&outfit_id)
         .fetch_one(&mut *tx)
