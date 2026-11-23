@@ -86,6 +86,10 @@ async fn main() {
         jwt_secret,
         jwt_issuer,
         encryption_key,
+        // Same default the code shipped with; the env override exists so the
+        // integration suite can run try-on against a local mock.
+        gemini_api_base: std::env::var("GEMINI_API_BASE")
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string()),
     });
 
     let app = build_router(state);

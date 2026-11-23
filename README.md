@@ -119,6 +119,7 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 - **Backend testing**: `cargo test`
 - **Frontend development**: `npm run dev` in `frontend/` (Vite on `http://localhost:5173`, proxies `/api/` to the backend)
 - **Frontend testing**: `npm test` in `frontend/` (Vitest)
+- **Frontend e2e**: `npm run test:e2e` in `frontend/` (Playwright smoke suite; boots `vite dev` plus in-repo stub Supabase-auth and API servers from `frontend/e2e/`)
 - **Frontend typecheck**: `npm run typecheck` in `frontend/` (`tsc --noEmit`)
 - **Frontend production build**: `npm run build` in `frontend/` (outputs to `frontend/dist/`)
 - **Local inference worker (optional)**:
@@ -133,5 +134,6 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 ## Testing
 
 - **Backend** (`cargo test`): unit tests covering filename sanitization, magic-byte sniffing, per-user storage keys and path authorization, AES-256-GCM round-trips, SSRF URL validation, image cache, and Discord message parsing.
-- **Backend integration** (`cargo test --test integration`): the real router against a real Postgres — the full migration chain applied to a clean schema, Supabase Storage mocked in-process. Covers auth rejections, generic CRUD scoping, outfit lifecycle, settings encryption, the signed file-token flow, upload validation, rate limiting and paging. Skipped automatically when no test database is reachable; point it at one with `CLOTHWEB_TEST_DATABASE_URL` (CI provides a disposable `cloth_test` database via a service container).
+- **Backend integration** (`cargo test --test integration`): the real router against a real Postgres — the full migration chain applied to a clean schema, with Supabase Storage, the Gemini REST endpoint, and the local Qwen worker all mocked in-process. Covers auth rejections, generic CRUD scoping, outfit lifecycle, settings encryption, the signed file-token flow, upload validation, rate limiting, paging, and both try-on provider paths (dispatch, request content, validation 400s, storage + thumbnails). Skipped automatically when no test database is reachable; point it at one with `CLOTHWEB_TEST_DATABASE_URL` (CI provides a disposable `cloth_test` database via a service container).
 - **Frontend** (`npm test`): Vitest suites for date/timezone handling, error classification, routing, sanitizers, the undo manager, insights metrics, layout persistence, widget smoke tests, picker recency ordering, and the signed-image URL client.
+- **Frontend e2e** (`npm run test:e2e`): a Playwright smoke suite in `frontend/e2e/` (kept out of the Vitest run) driving the five critical flows against `vite dev` with a stubbed Supabase auth endpoint and stubbed backend: login, add item with image upload, log an outfit, insights render, and settings save/provider switch. Runs in CI as its own job.

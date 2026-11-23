@@ -1593,13 +1593,22 @@ pub async fn generate_outfit_preview(
             .build()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        let gemini_endpoint = format!(
+            "{}/models/gemini-2.5-flash-image:generateContent",
+            state.gemini_api_base.trim_end_matches('/')
+        );
         let res = client
-            .post("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .post(&gemini_endpoint)
             .header("x-goog-api-key", &api_key)
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to reach Gemini API: {e}")))?;
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to reach Gemini API: {e}"),
+                )
+            })?;
 
         let status = res.status();
         if !status.is_success() {

@@ -36,6 +36,9 @@ pub struct AppState {
     // Supabase project URL: the `iss` claim every valid access token carries.
     pub jwt_issuer: String,
     pub encryption_key: [u8; 32],
+    // Gemini REST base (`.../v1beta`). Overridable so the integration tests can
+    // point try-on at an in-process mock; production keeps the real endpoint.
+    pub gemini_api_base: String,
 }
 
 /// Hygiene headers on every response. The SPA itself is served by the tunnel

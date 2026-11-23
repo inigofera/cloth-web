@@ -1,7 +1,8 @@
 //! End-to-end integration tests: a real Postgres (the full migration chain
-//! applied to a clean schema) plus an in-process mock of the Supabase
-//! Storage API. The app under test is built with the same `build_router`
-//! the binary uses, so these tests exercise exactly what ships.
+//! applied to a clean schema) plus in-process mocks of the Supabase Storage
+//! API, the Gemini REST endpoint, and the local Qwen worker. The app under
+//! test is built with the same `build_router` the binary uses, so these
+//! tests exercise exactly what ships.
 //!
 //! Skipped gracefully when no test database is reachable: set
 //! `CLOTHWEB_TEST_DATABASE_URL`, or run Postgres at 127.0.0.1:5432 with a
@@ -15,7 +16,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
 use sqlx::postgres::{PgPoolOptions, Postgres};
@@ -148,6 +149,143 @@ async fn start_storage_mock(store: MockStore) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// In-process provider mocks for the try-on flow: one answers the Gemini
+// REST endpoint (`{gemini_api_base}/models/gemini-2.5-flash-image:generateContent`),
+// the other the local Qwen worker (`{local_qwen_url}/generate` + `/health`).
+// Both record every request so scenarios can assert provider dispatch and
+// request content. Counters are reset per scenario (scenarios run serially).
+// ---------------------------------------------------------------------------
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+
+#[derive(Clone, Default)]
+struct GeminiLog {
+    /// One entry per request: the `x-goog-api-key` header (empty if absent).
+    keys: Vec<String>,
+    /// One entry per request: the raw request body, for content assertions.
+    bodies: Vec<String>,
+}
+
+#[derive(Clone)]
+struct GeminiMock {
+    inner: Arc<Mutex<GeminiLog>>,
+}
+
+impl GeminiMock {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(GeminiLog::default())),
+        }
+    }
+
+    fn reset(&self) {
+        self.inner.lock().unwrap().keys.clear();
+        self.inner.lock().unwrap().bodies.clear();
+    }
+
+    /// (request count, last key, last body)
+    fn snapshot(&self) -> (usize, Option<String>, Option<String>) {
+        let log = self.inner.lock().unwrap();
+        (
+            log.keys.len(),
+            log.keys.last().cloned(),
+            log.bodies.last().cloned(),
+        )
+    }
+}
+
+async fn gemini_generate(
+    Path(_rest): Path<String>,
+    State(mock): State<GeminiMock>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::Json<Value> {
+    let key = headers
+        .get("x-goog-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let mut log = mock.inner.lock().unwrap();
+    log.keys.push(key);
+    log.bodies.push(String::from_utf8_lossy(&body).to_string());
+    drop(log);
+
+    let b64 = B64.encode(wide_jpeg());
+    axum::Json(serde_json::json!({
+        "candidates": [{
+            "finishReason": "STOP",
+            "content": {
+                "parts": [{ "inlineData": { "mimeType": "image/jpeg", "data": b64 } }]
+            }
+        }]
+    }))
+}
+
+async fn start_gemini_mock(mock: GeminiMock) -> String {
+    let router = Router::new()
+        .route("/v1beta/models/*rest", post(gemini_generate))
+        .with_state(mock);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[derive(Clone)]
+struct QwenMock {
+    inner: Arc<Mutex<Vec<Value>>>,
+}
+
+impl QwenMock {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn reset(&self) {
+        self.inner.lock().unwrap().clear();
+    }
+
+    fn requests(&self) -> Vec<Value> {
+        self.inner.lock().unwrap().clone()
+    }
+}
+
+async fn qwen_generate(State(mock): State<QwenMock>, body: Bytes) -> axum::Json<Value> {
+    let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    mock.inner.lock().unwrap().push(parsed);
+    let b64 = B64.encode(wide_jpeg());
+    axum::Json(serde_json::json!({ "image_base64": b64 }))
+}
+
+async fn qwen_health() -> axum::Json<Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "model": "qwen-image-2.1-turbo-Q6_K_XL.gguf",
+        "ready": true
+    }))
+}
+
+async fn start_qwen_mock(mock: QwenMock) -> String {
+    let router = Router::new()
+        .route("/generate", post(qwen_generate))
+        .route("/health", get(qwen_health))
+        .with_state(mock);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+// ---------------------------------------------------------------------------
 // Shared app: one database reset + one migration pass + one mock, shared by
 // every test in this binary.
 // ---------------------------------------------------------------------------
@@ -157,6 +295,10 @@ struct TestApp {
     router: Router,
     pool: Pool<Postgres>,
     store: MockStore,
+    gemini: GeminiMock,
+    qwen: QwenMock,
+    /// The Qwen worker base URL each scenario points its user settings at.
+    qwen_url: String,
 }
 
 static APP: tokio::sync::OnceCell<TestApp> = tokio::sync::OnceCell::const_new();
@@ -206,6 +348,11 @@ async fn app() -> Option<TestApp> {
             let store = MockStore::new();
             let base_url = start_storage_mock(store.clone()).await;
 
+            let gemini = GeminiMock::new();
+            let gemini_url = start_gemini_mock(gemini.clone()).await;
+            let qwen = QwenMock::new();
+            let qwen_url = start_qwen_mock(qwen.clone()).await;
+
             let schema = Arc::new(SchemaCache::new());
             schema.refresh(&pool).await;
 
@@ -218,12 +365,18 @@ async fn app() -> Option<TestApp> {
                 jwt_secret: TEST_SECRET.to_string(),
                 jwt_issuer: TEST_ISSUER.to_string(),
                 encryption_key: [7u8; 32],
+                // The handler appends `/models/...` to the base; production's
+                // base ends in `/v1beta`, so the test mirror it.
+                gemini_api_base: format!("{gemini_url}/v1beta"),
             });
 
             TestApp {
                 router: build_router(state),
                 pool,
                 store,
+                gemini,
+                qwen,
+                qwen_url,
             }
         })
         .await;
@@ -303,6 +456,18 @@ fn tiny_jpeg() -> Vec<u8> {
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new(&mut out)
         .encode(img.as_raw(), 16, 16, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+/// An 800x800 JPEG, wide enough that `thumbs_from_stored` emits both
+/// thumbnails (thumbnails never upscale, so the tiny fixture yields none).
+/// This mirrors what a real generation provider returns, not a test fixture.
+fn wide_jpeg() -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(800, 800, image::Rgb([40, 120, 200]));
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut out)
+        .encode(img.as_raw(), 800, 800, image::ExtendedColorType::Rgb8)
         .unwrap();
     out
 }
@@ -1396,6 +1561,345 @@ async fn tryon_rate_limit_kicks_in_at_five_per_minute() {
     assert_eq!(statuses, expected);
 }
 
+// ---------------------------------------------------------------------------
+// Try-on generation: provider dispatch, validation, storage + thumbnails
+// ---------------------------------------------------------------------------
+
+/// Update the caller's settings through the API (the same endpoint the
+/// Settings view uses) and return the server's updated settings.
+async fn set_settings(app: &TestApp, token: &str, fields: Value) -> Value {
+    let payload = serde_json::to_vec(&fields).unwrap();
+    let resp = call(
+        app,
+        make_request(
+            "PUT",
+            "/settings",
+            Some(token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PUT /settings: {}",
+        String::from_utf8(body_bytes(resp).await).unwrap_or_default()
+    );
+    body_json(resp).await
+}
+
+/// Create an item and attach a freshly uploaded test photo to it, so the
+/// try-on handler finds a real `image_path` in storage.
+async fn item_with_photo(app: &TestApp, token: &str, name: &str) -> String {
+    let id = create_item(app, token, name).await;
+    let key = upload_image(app, token).await;
+    let payload = serde_json::to_vec(&serde_json::json!({ "image_path": key })).unwrap();
+    let resp = call(
+        app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{id}"),
+            Some(token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH item {id}: {}",
+        String::from_utf8(body_bytes(resp).await).unwrap_or_default()
+    );
+    id
+}
+
+/// A complete Gemini configuration: stored API key + reference photo.
+fn gemini_settings(ref_key: &str) -> Value {
+    serde_json::json!({
+        "api_key": "gemini-test-key-abcdef123456",
+        "reference_image_path": ref_key,
+        "tryon_provider": "gemini"
+    })
+}
+
+async fn tryon_gemini_generation_dispatches_and_stores() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    app.gemini.reset();
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+
+    let ref_key = upload_image(&app, &token).await;
+    let settings = set_settings(&app, &token, gemini_settings(&ref_key)).await;
+    assert!(settings["has_api_key"].as_bool().unwrap());
+
+    let item = item_with_photo(&app, &token, "Grey Hoodie").await;
+    let payload = serde_json::to_vec(&serde_json::json!({ "item_ids": [item] })).unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/outfits/generate-preview",
+            Some(&token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "gemini generate-preview: {}",
+        String::from_utf8(body_bytes(resp).await).unwrap_or_default()
+    );
+    let image_path = body_json(resp).await["image_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        image_path.starts_with(&format!("users/{me}/")),
+        "image_path: {image_path}"
+    );
+    assert!(image_path.ends_with("-tryon.jpg"));
+
+    // The generated image landed in storage and decodes as a real JPEG.
+    let (bytes, _) = app.store.object(&image_path).unwrap();
+    assert!(
+        image::load_from_memory(&bytes).is_ok(),
+        "stored try-on image must decode"
+    );
+    // ...and got the same thumbnails as any other upload.
+    for width in [96, 480] {
+        assert!(
+            app.store
+                .object(&backend::upload::thumb_storage_key(&image_path, width))
+                .is_some(),
+            "missing {width}px thumbnail for {image_path}"
+        );
+    }
+
+    // Dispatch went to Gemini exactly once, carrying the decrypted API key
+    // and the reference photo bytes.
+    let (count, key, req_body) = app.gemini.snapshot();
+    assert_eq!(count, 1, "expected exactly one Gemini request");
+    assert_eq!(key.as_deref(), Some("gemini-test-key-abcdef123456"));
+    let ref_b64 = B64.encode(app.store.object(&ref_key).unwrap().0);
+    assert!(
+        req_body.as_deref().unwrap().contains(&ref_b64),
+        "Gemini request must embed the reference photo"
+    );
+}
+
+async fn tryon_qwen_generation_dispatches_and_stores() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    app.gemini.reset();
+    app.qwen.reset();
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+
+    let ref_key = upload_image(&app, &token).await;
+    let settings = set_settings(
+        &app,
+        &token,
+        serde_json::json!({
+            "reference_image_path": ref_key,
+            "tryon_provider": "qwen_local",
+            "local_qwen_url": app.qwen_url
+        }),
+    )
+    .await;
+    assert_eq!(settings["tryon_provider"].as_str().unwrap(), "qwen_local");
+
+    let item = item_with_photo(&app, &token, "Navy Trousers").await;
+    let payload = serde_json::to_vec(&serde_json::json!({ "item_ids": [item] })).unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/outfits/generate-preview",
+            Some(&token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "qwen generate-preview: {}",
+        String::from_utf8(body_bytes(resp).await).unwrap_or_default()
+    );
+    let image_path = body_json(resp).await["image_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(image_path.starts_with(&format!("users/{me}/")));
+    let (bytes, _) = app.store.object(&image_path).unwrap();
+    assert!(
+        image::load_from_memory(&bytes).is_ok(),
+        "stored try-on image must decode"
+    );
+
+    // The request went to the local worker — not to Gemini — and carried the
+    // prompt plus the reference photo first, then each garment.
+    let (gemini_count, _, _) = app.gemini.snapshot();
+    assert_eq!(gemini_count, 0, "qwen_local must not call Gemini");
+    let reqs = app.qwen.requests();
+    assert_eq!(reqs.len(), 1);
+    let req = &reqs[0];
+    assert!(
+        req["prompt"].as_str().unwrap().contains("Navy Trousers"),
+        "qwen prompt must name the garment"
+    );
+    let images = req["images_base64"].as_array().unwrap();
+    assert_eq!(images.len(), 2, "reference photo + one garment");
+    let ref_b64 = B64.encode(app.store.object(&ref_key).unwrap().0);
+    assert_eq!(images[0].as_str().unwrap(), ref_b64);
+}
+
+/// Every 400 path the handler has, checked against a freshly configured user
+/// each time so the per-minute generation cap never interferes.
+async fn tryon_rejects_misconfigured_or_invalid_requests() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    app.gemini.reset();
+    app.qwen.reset();
+
+    async fn expect_400(app: &TestApp, token: &str, body: &Value) -> String {
+        let resp = call(
+            app,
+            make_request(
+                "POST",
+                "/outfits/generate-preview",
+                Some(token),
+                serde_json::to_vec(body).unwrap(),
+                Some("application/json"),
+            ),
+        )
+        .await;
+        let status = resp.status();
+        let text = String::from_utf8(body_bytes(resp).await).unwrap();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expected 400, body: {text}"
+        );
+        text
+    }
+
+    // 1. No reference photo configured.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    set_settings(
+        &app,
+        &token,
+        serde_json::json!({ "api_key": "gemini-test-key-abcdef123456" }),
+    )
+    .await;
+    let item = item_with_photo(&app, &token, "No Ref Tee").await;
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": [item] })).await;
+    assert!(body.contains("reference"), "no-reference error: {body}");
+
+    // 2. Gemini selected but no API key stored.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    let ref_key = upload_image(&app, &token).await;
+    set_settings(
+        &app,
+        &token,
+        serde_json::json!({ "reference_image_path": ref_key }),
+    )
+    .await;
+    let item = item_with_photo(&app, &token, "No Key Tee").await;
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": [item] })).await;
+    assert!(body.contains("API key"), "no-key error: {body}");
+
+    // 3. Item that is not in the caller's wardrobe.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    let ref_key = upload_image(&app, &token).await;
+    set_settings(&app, &token, gemini_settings(&ref_key)).await;
+    let other = fresh_user(&app.pool).await;
+    let other_token = jwt(&other, "authenticated", TEST_ISSUER, 3600);
+    let foreign = item_with_photo(&app, &other_token, "Foreign Jeans").await;
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": [foreign] })).await;
+    assert!(body.contains("not found"), "foreign-item error: {body}");
+
+    // 4. Item without a photo.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    let ref_key = upload_image(&app, &token).await;
+    set_settings(&app, &token, gemini_settings(&ref_key)).await;
+    let bare = create_item(&app, &token, "No Photo Cap").await;
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": [bare] })).await;
+    assert!(body.contains("photo"), "no-photo error: {body}");
+
+    // 5. Count bounds: zero and more than eight items.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    let ref_key = upload_image(&app, &token).await;
+    set_settings(&app, &token, gemini_settings(&ref_key)).await;
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": [] })).await;
+    assert!(body.contains("between 1 and 8"), "empty error: {body}");
+    let ids: Vec<Value> = (0..9).map(|_| serde_json::json!(Uuid::new_v4())).collect();
+    let body = expect_400(&app, &token, &serde_json::json!({ "item_ids": ids })).await;
+    assert!(body.contains("between 1 and 8"), "over-cap error: {body}");
+
+    // 6. Local Qwen selected with a URL the validator must refuse
+    //    (non-loopback host). The settings endpoint refuses to *store* such a
+    //    URL, so this path is only reachable with a row the API never wrote —
+    //    seed it directly and let the handler's defense-in-depth check catch it.
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+    let ref_key = upload_image(&app, &token).await;
+    set_settings(
+        &app,
+        &token,
+        serde_json::json!({
+            "reference_image_path": ref_key,
+            "tryon_provider": "qwen_local",
+            "local_qwen_url": app.qwen_url
+        }),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE public.\"user-settings\" SET local_qwen_url = 'http://example.com:1234' \
+         WHERE user_id = $1",
+    )
+    .bind(me)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let body = expect_400(
+        &app,
+        &token,
+        &serde_json::json!({ "item_ids": [Uuid::new_v4()] }),
+    )
+    .await;
+    assert!(
+        body.contains("Invalid local Qwen URL"),
+        "bad-url error: {body}"
+    );
+
+    // None of the failed attempts may have reached a provider.
+    let (gemini_count, _, _) = app.gemini.snapshot();
+    assert_eq!(gemini_count, 0, "failed requests must not call Gemini");
+    assert_eq!(
+        app.qwen.requests().len(),
+        0,
+        "failed requests must not call Qwen"
+    );
+}
+
 async fn list_endpoints_report_exact_totals_and_page() {
     let Some(app) = app().await else {
         eprintln!("skipped: no test database");
@@ -1533,6 +2037,15 @@ fn integration_suite() {
         scenario!(
             "tryon_rate_limit",
             tryon_rate_limit_kicks_in_at_five_per_minute()
+        );
+        scenario!(
+            "tryon_gemini",
+            tryon_gemini_generation_dispatches_and_stores()
+        );
+        scenario!("tryon_qwen", tryon_qwen_generation_dispatches_and_stores());
+        scenario!(
+            "tryon_validation",
+            tryon_rejects_misconfigured_or_invalid_requests()
         );
         scenario!("paging", list_endpoints_report_exact_totals_and_page());
 

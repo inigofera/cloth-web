@@ -30,3 +30,7 @@ local_inference/local_inference/
 
 # Local readiness/progress report (kept out of the repo)
 /V1.0_READINESS.md
+
+# Playwright e2e output
+frontend/test-results/
+frontend/playwright-report/

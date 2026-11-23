@@ -55,6 +55,11 @@ jobs:
           CLOTHWEB_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/cloth_test
         run: cargo test
 
+      - name: Dependency audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: Build (release)
         run: cargo build --release
 
@@ -87,11 +92,66 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Dependency audit
+        # Medium and below stay advisory; high/critical block the build.
+        run: npm audit --audit-level=high
+
       - name: Build
         run: npm run build
+
+      - name: Guard bundle env
+        # §8.4: a build with an empty/placeholder production env would ship a
+        # dead app while CI stays green. When the real secrets are set, the
+        # bundle must contain the real URL and not the placeholder.
+        run: |
+          if [ "$VITE_SUPABASE_URL" = "https://ci-placeholder.supabase.co" ]; then
+            echo "::notice::CI placeholder VITE_SUPABASE_URL in use; bundle-env guard skipped"
+            exit 0
+          fi
+          grep -rqF "$VITE_SUPABASE_URL" dist/assets \
+            || { echo "::error::built bundle is missing $VITE_SUPABASE_URL"; exit 1; }
+          if grep -rqF "ci-placeholder.supabase.co" dist/assets; then
+            echo "::error::built bundle still contains the placeholder URL"
+            exit 1
+          fi
+          echo "bundle contains the real VITE_SUPABASE_URL"
 
       - name: Upload frontend build
         uses: actions/upload-artifact@v5
         with:
           name: frontend-dist
           path: frontend/dist
+
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run e2e smoke suite
+        # Boots vite dev + the in-repo stub servers (see frontend/e2e/) and
+        # drives the five critical flows: login, add item, log outfit,
+        # insights render, settings save.
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 14
