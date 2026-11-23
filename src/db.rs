@@ -99,6 +99,20 @@ impl TableFacts {
 // only as the fallback for a table with neither column, where a fallback order cannot
 // lie because those tables are read whole. A table with a `created_at` but no id column
 // has no cheap tie-break either, so it keeps that shipped order rather than an unstable one.
+/// Reference tables that follow the shared-or-owned shape: a nullable
+/// `user_id`, where `NULL` means a legacy shared row visible to everyone and
+/// a set value means the row belongs to that user only. The generic read path
+/// therefore filters `user_id = caller OR user_id IS NULL` instead of the
+/// strict `user_id = caller` used for fully user-scoped tables. `brands` was
+/// already on this shape before the reference tables were scoped
+/// (20261123000000_scope_reference_data.sql).
+pub fn is_shared_or_owned_table(name: &str) -> bool {
+    matches!(
+        name,
+        "brands" | "colors" | "clothing-categories" | "clothing-subcategories"
+    )
+}
+
 pub fn order_sql_for(has_created_at: bool, has_id: bool) -> String {
     if has_created_at && has_id {
         "ORDER BY t.\"created_at\" DESC NULLS LAST, t.id ASC".to_string()
@@ -157,6 +171,14 @@ pub fn facts_for(table: String, columns: Vec<ColumnFact>) -> TableFacts {
     };
     let (id_filter, id_filter_aliased) = id_filters_for(id_data_type);
     let order_sql = order_sql_for(has_created_at, has_id);
+    // Shared-or-owned reference tables: the caller sees their own rows plus the
+    // legacy shared ones (`user_id IS NULL`). Everything else with a `user_id`
+    // column is strictly scoped to the caller.
+    let scoped_filter = if has_user_id && is_shared_or_owned_table(&table) {
+        "WHERE (t.user_id = $1 OR t.user_id IS NULL)"
+    } else {
+        "WHERE t.user_id = $1"
+    };
     let select_list = if columns.is_empty() {
         "r.*".to_string()
     } else {
@@ -169,7 +191,7 @@ pub fn facts_for(table: String, columns: Vec<ColumnFact>) -> TableFacts {
     // client can walk a table in pages while `COUNT(*) OVER ()` still reports the
     // rows that exist rather than the rows this page happens to include.
     let scoped_rows_sql = format!(
-        "SELECT to_jsonb(t) AS row, COUNT(*) OVER () AS total FROM public.\"{quoted_table}\" t WHERE t.user_id = $1 {order_sql} LIMIT $2 OFFSET $3",
+        "SELECT to_jsonb(t) AS row, COUNT(*) OVER () AS total FROM public.\"{quoted_table}\" t {scoped_filter} {order_sql} LIMIT $2 OFFSET $3",
     );
     let shared_rows_sql = format!(
         "SELECT to_jsonb(t) AS row, COUNT(*) OVER () AS total FROM public.\"{quoted_table}\" t {order_sql} LIMIT $1 OFFSET $2",
@@ -497,6 +519,27 @@ pub mod schema_tests {
             .update_tail
             .find("WHERE t.id = $1 AND t.user_id = $3")
             .is_some());
+    }
+
+    #[test]
+    fn shared_or_owned_reference_tables_keep_the_shared_rows_visible() {
+        let colors = facts_for(
+            "colors".to_string(),
+            vec![id_of("text".to_string()), owner()],
+        );
+        assert!(colors.has_user_id);
+        assert!(colors
+            .scoped_rows_sql
+            .find("WHERE (t.user_id = $1 OR t.user_id IS NULL)")
+            .is_some());
+
+        // A fully user-scoped table keeps the strict filter.
+        let items = facts_for(
+            "clothing-items".to_string(),
+            vec![id_of("uuid".to_string()), owner()],
+        );
+        assert!(items.scoped_rows_sql.find("WHERE t.user_id = $1").is_some());
+        assert!(items.scoped_rows_sql.find("OR t.user_id IS NULL").is_none());
     }
 
     #[test]

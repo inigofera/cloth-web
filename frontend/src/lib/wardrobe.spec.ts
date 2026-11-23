@@ -124,6 +124,71 @@ describe('wardrobe store', () => {
     expect(store.items.value.find(item => item.id === 'i2')?.wear_count).toBe(0);
   });
 
+  it('mirrors a full-replacement outfit edit: links, order and wear counts', async () => {
+    const store = createWardrobeStore(makeClient());
+    await store.load();
+    // o1 wears i1 + i2; give it a third garment to play with.
+    store.addItem(clothingItem('i3', { name: 'Wool Coat' }));
+
+    const updated = outfit('o1', '2024-01-05', ['i2', 'i3']);
+    store.replaceOutfit(updated);
+
+    // The row swapped in place and the list re-sorted by date.
+    expect(store.outfits.value.map(o => o.id)).toEqual(['o1']);
+    expect(store.outfits.value[0].item_ids).toEqual(['i2', 'i3']);
+    expect(store.outfits.value[0].date).toBe('2024-01-05');
+    // i1 lost its wear count, i3 gained one, i2 is untouched.
+    expect(store.items.value.find(item => item.id === 'i1')?.wear_count).toBe(2);
+    expect(store.items.value.find(item => item.id === 'i2')?.wear_count).toBe(0);
+    expect(store.items.value.find(item => item.id === 'i3')?.wear_count).toBe(1);
+
+    // Emptying the outfit drops every remaining link (floored at 0).
+    store.replaceOutfit(outfit('o1', '2024-01-05', []));
+    expect(store.outfits.value[0].item_ids).toEqual([]);
+    expect(store.items.value.find(item => item.id === 'i2')?.wear_count).toBe(0);
+    expect(store.items.value.find(item => item.id === 'i3')?.wear_count).toBe(0);
+  });
+
+  it('renames and removes reference rows, re-pointing items locally', async () => {
+    const store = createWardrobeStore(
+      makeClient({
+        listClothingItemsWithTotal: vi.fn().mockResolvedValue({
+          items: [
+            clothingItem('i1', { color_id: 'blue', category_id: 1, subcategory_id: 10, brand_id: 'b1' }),
+            clothingItem('i2', { color_id: 'blue' }),
+          ],
+          total: null,
+        }),
+      })
+    );
+    await store.load();
+
+    store.renameColor('blue', 'navy');
+    expect(store.colors.value.map(c => c.id)).toEqual(['navy']);
+    expect(store.items.value.every(item => item.color_id === 'navy')).toBe(true);
+
+    store.renameCategory(1, 'Tees');
+    expect(store.categories.value[0].name).toBe('Tees');
+    // Categories keep their id: item references are untouched.
+    expect(store.items.value.find(item => item.id === 'i1')?.category_id).toBe(1);
+
+    store.removeCategory(1);
+    expect(store.categories.value).toEqual([]);
+    expect(store.subcategories.value).toEqual([]); // subcategories go with it
+    expect(store.items.value.find(item => item.id === 'i1')?.category_id).toBeNull();
+    expect(store.items.value.find(item => item.id === 'i1')?.subcategory_id).toBeNull();
+    expect(store.items.value.find(item => item.id === 'i2')?.category_id).toBeNull();
+
+    store.removeColor('navy');
+    expect(store.colors.value).toEqual([]);
+    expect(store.items.value.every(item => item.color_id === null)).toBe(true);
+
+    store.addBrand({ id: 'b1', name: 'Acme' });
+    store.removeBrand('b1');
+    expect(store.brands.value).toEqual([]);
+    expect(store.items.value.find(item => item.id === 'i1')?.brand_id).toBeNull();
+  });
+
   it('adds new reference data without duplicating existing rows', async () => {
     const store = createWardrobeStore(makeClient());
     await store.load();

@@ -35,21 +35,28 @@ async fn main() {
     encryption_key.copy_from_slice(&key_bytes);
 
     // Startup sweep: import any Discord outfits posted since the last run, for
-    // the configured user (or the largest active wardrobe).
-    let db_for_sweep = db.clone();
-    tokio::spawn(async move {
-        let user_id_res = if let Ok(uid_str) = std::env::var("DISCORD_DEFAULT_USER_ID") {
-            uuid::Uuid::parse_str(&uid_str).ok()
-        } else {
-            sqlx::query_scalar::<_, uuid::Uuid>(
-                r#"SELECT user_id FROM "clothing-items" WHERE is_active = true GROUP BY user_id ORDER BY count(*) DESC LIMIT 1"#
-            )
-            .fetch_optional(&db_for_sweep)
-            .await
-            .unwrap_or(None)
-        };
+    // the configured user. With more than one user the sweep must never guess
+    // (the old fallback picked the largest active wardrobe - wrong-user data),
+    // so Discord being enabled without a configured user is a configuration
+    // error that fails startup loudly.
+    let discord_enabled = std::env::var("DISCORD_BOT_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let sweep_user: Option<uuid::Uuid> = std::env::var("DISCORD_DEFAULT_USER_ID")
+        .ok()
+        .and_then(|s| uuid::Uuid::parse_str(&s).ok());
+    if discord_enabled && sweep_user.is_none() {
+        panic!(
+            "DISCORD_BOT_TOKEN is set but DISCORD_DEFAULT_USER_ID is not: the startup \
+             sweep imports for exactly one user and must not guess. Set \
+             DISCORD_DEFAULT_USER_ID to the app user id to import for, or unset \
+             DISCORD_BOT_TOKEN to disable the Discord integration."
+        );
+    }
 
-        if let Some(user_id) = user_id_res {
+    if let Some(user_id) = sweep_user {
+        let db_for_sweep = db.clone();
+        tokio::spawn(async move {
             tracing::info!(%user_id, "discord sweep: checking for new outfits");
             match backend::discord::sync_discord_for_user(&db_for_sweep, user_id).await {
                 Ok(res) => {
@@ -69,8 +76,8 @@ async fn main() {
                     tracing::error!(%e, "discord sweep failed at startup");
                 }
             }
-        }
-    });
+        });
+    }
 
     // Warm the schema snapshot before the first request can arrive: one statement reads the
     // shape of every public table, and the CRUD endpoints never pay that read themselves.

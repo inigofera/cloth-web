@@ -119,6 +119,52 @@ export interface CreateOutfitPayload {
   image_path?: string | null;
 }
 
+/**
+ * Full-replacement payload for `PATCH /outfits/:id`: same shape as creation,
+ * the server diffs the item links and adjusts wear counts in one
+ * transaction.
+ */
+export type UpdateOutfitPayload = CreateOutfitPayload;
+
+/**
+ * Versioned export document from `GET /export`: the caller's items and
+ * outfits (carrying `item_ids`) plus every reference row visible to them.
+ */
+export interface ExportDocument {
+  version: number;
+  exported_at: string;
+  user_id: UUID;
+  items: unknown[];
+  outfits: unknown[];
+  colors: unknown[];
+  categories: unknown[];
+  subcategories: unknown[];
+  brands: unknown[];
+}
+
+/** Result of `POST /import`: how much of the document was actually written. */
+export interface ImportResult {
+  items_imported: number;
+  outfits_imported: number;
+  links_added: number;
+  colors_created: number;
+  categories_created: number;
+  subcategories_created: number;
+  brands_created: number;
+}
+
+/**
+ * Per-name reference counts from `GET /reference-usage`, for the settings
+ * reference-data manager. Names that the caller owns but nothing references
+ * are present with a zero count.
+ */
+export interface ReferenceUsage {
+  colors: Record<string, number>;
+  categories: Record<string, number>;
+  subcategories: Record<string, number>;
+  brands: Record<string, number>;
+}
+
 export type TryOnProvider = 'gemini' | 'qwen_local';
 
 export interface UserSettings {

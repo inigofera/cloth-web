@@ -262,6 +262,34 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     adjustWearCounts(outfit.item_ids, -1);
   }
 
+  /**
+   * Mirror of `PATCH /outfits/:id`: the caller passes the server's updated
+   * row, the snapshot swaps it in (re-sorting by date), and wear counts move
+   * exactly as the server moved them in its transaction: +1 for items the
+   * outfit gained, -1 (floored at 0) for items it lost.
+   */
+  function replaceOutfit(outfit: Outfit): void {
+    const index = outfits.value.findIndex(existing => existing.id === outfit.id);
+    const previous = index === -1 ? null : outfits.value[index];
+
+    const next = outfits.value.slice();
+    if (index === -1) {
+      next.push(outfit);
+    } else {
+      next[index] = outfit;
+    }
+    touch();
+    outfits.value = next.sort((a, b) => a.date.localeCompare(b.date));
+
+    if (!previous) return;
+    const before = new Set(previous.item_ids);
+    const after = new Set(outfit.item_ids);
+    const added = outfit.item_ids.filter(id => !before.has(id));
+    const removed = previous.item_ids.filter(id => !after.has(id));
+    if (added.length > 0) adjustWearCounts(added, 1);
+    if (removed.length > 0) adjustWearCounts(removed, -1);
+  }
+
   // ---------------------------------------------------------------------------
   // Shared reference data
   // ---------------------------------------------------------------------------
@@ -294,6 +322,94 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Reference-data management (M5): local mirrors of the dedicated
+  // rename/delete endpoints, which re-point or clear item references in the
+  // same server transaction.
+  // ---------------------------------------------------------------------------
+
+  /** Rename a color: the row keeps its identity slot, every item that used
+   * the old slug now carries the new one. */
+  function renameColor(oldId: string, newId: string): void {
+    if (oldId === newId) return;
+    touch();
+    colors.value = colors.value.map(color => (color.id === oldId ? { ...color, id: newId } : color));
+    items.value = items.value.map(item =>
+      item.color_id === oldId ? { ...item, color_id: newId } : item,
+    );
+  }
+
+  /** Delete a color: only ever succeeds when nothing references it, so no
+   * item repair is needed. */
+  function removeColor(id: string): void {
+    touch();
+    colors.value = colors.value.filter(color => color.id !== id);
+    items.value = items.value.map(item =>
+      item.color_id === id ? { ...item, color_id: null } : item,
+    );
+  }
+
+  /** Rename a category: the integer id is stable, so item references are
+   * untouched - only the row's name changes. */
+  function renameCategory(id: number, name: string): void {
+    touch();
+    categories.value = categories.value.map(category =>
+      category.id === id ? { ...category, name } : category,
+    );
+  }
+
+  /** Delete a category: the server removes its owned subcategories and
+   * clears every reference from the caller's items; both are mirrored. */
+  function removeCategory(id: number): void {
+    const removedSubs = new Set(
+      subcategories.value.filter(sub => sub.category_id === id).map(sub => sub.id),
+    );
+    touch();
+    categories.value = categories.value.filter(category => category.id !== id);
+    subcategories.value = subcategories.value.filter(sub => !removedSubs.has(sub.id));
+    items.value = items.value.map(item => {
+      if (item.category_id !== id && !removedSubs.has(item.subcategory_id ?? -1)) return item;
+      return {
+        ...item,
+        category_id: item.category_id === id ? null : item.category_id,
+        subcategory_id: removedSubs.has(item.subcategory_id ?? -1) ? null : item.subcategory_id,
+      };
+    });
+  }
+
+  /** Rename (and optionally move) a subcategory: id is stable, items keep
+   * pointing at it. */
+  function renameSubcategory(id: number, name: string, categoryId?: number | null): void {
+    touch();
+    subcategories.value = subcategories.value.map(sub =>
+      sub.id === id
+        ? { ...sub, name, category_id: categoryId ?? sub.category_id }
+        : sub,
+    );
+  }
+
+  function removeSubcategory(id: number): void {
+    touch();
+    subcategories.value = subcategories.value.filter(sub => sub.id !== id);
+    items.value = items.value.map(item =>
+      item.subcategory_id === id ? { ...item, subcategory_id: null } : item,
+    );
+  }
+
+  function renameBrand(id: string, name: string): void {
+    touch();
+    brands.value = brands.value.map(brand => (brand.id === id ? { ...brand, name } : brand));
+  }
+
+  /** Delete a brand: item references are cleared by the server. */
+  function removeBrand(id: string): void {
+    touch();
+    brands.value = brands.value.filter(brand => brand.id !== id);
+    items.value = items.value.map(item =>
+      item.brand_id === id ? { ...item, brand_id: null } : item,
+    );
+  }
+
   return {
     items,
     itemTotal: readonly(itemTotal),
@@ -315,12 +431,21 @@ export function createWardrobeStore(client: WardrobeClient = api) {
     patchItem,
     removeItem,
     addOutfit,
+    replaceOutfit,
     removeOutfit,
     itemsOf,
     addColor,
     addCategory,
     addSubcategory,
     addBrand,
+    renameColor,
+    removeColor,
+    renameCategory,
+    removeCategory,
+    renameSubcategory,
+    removeSubcategory,
+    renameBrand,
+    removeBrand,
   };
 }
 

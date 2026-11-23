@@ -906,7 +906,8 @@ async fn shared_reference_tables_are_read_only() {
     let me = fresh_user(&app.pool).await;
     let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
 
-    // Reading a shared table works.
+    // Reading works: colors are shared-or-owned now, so a fresh user sees the
+    // shared rows (none here) plus their own.
     let resp = call(
         &app,
         make_request("GET", "/db/colors", Some(&token), vec![], None),
@@ -914,21 +915,35 @@ async fn shared_reference_tables_are_read_only() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // But writing through the generic API is forbidden: colors have no user_id.
+    // But writing through the generic API is refused: the dedicated endpoints
+    // own color writes (scoping + slug validation). The same applies to the
+    // other reference tables and to outfits.
     let payload =
         serde_json::to_vec(&serde_json::json!({ "id": "hacked", "hex_value": "#ff0000" })).unwrap();
-    let resp = call(
-        &app,
-        make_request(
-            "POST",
-            "/db/colors",
-            Some(&token),
-            payload,
-            Some("application/json"),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    for (method, path) in [
+        ("POST", "/db/colors"),
+        ("POST", "/db/clothing-categories"),
+        ("POST", "/db/brands"),
+        ("PATCH", "/db/outfits/some-id"),
+        ("DELETE", "/db/outfits/some-id"),
+    ] {
+        let resp = call(
+            &app,
+            make_request(
+                method,
+                path,
+                Some(&token),
+                payload.clone(),
+                Some("application/json"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path} must be refused for dedicated-write tables"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1958,6 +1973,871 @@ async fn list_endpoints_report_exact_totals_and_page() {
 }
 
 // ---------------------------------------------------------------------------
+// M5: outfit editing, export/import, reference-data scoping and management
+// ---------------------------------------------------------------------------
+
+async fn patch_outfit(app: &TestApp, token: &str, id: &str, body: &Value) -> Value {
+    let payload = serde_json::to_vec(body).unwrap();
+    let resp = call(
+        app,
+        make_request(
+            "PATCH",
+            &format!("/outfits/{id}"),
+            Some(token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH failed: {}",
+        String::from_utf8_lossy(&body_bytes(resp).await)
+    );
+    body_json(resp).await
+}
+
+async fn outfit_edit_updates_fields_and_wear_counts() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    let me = fresh_user(&app.pool).await;
+    let token = jwt(&me, "authenticated", TEST_ISSUER, 3600);
+
+    let a = create_item(&app, &token, "Alpha Tshirt").await;
+    let b = create_item(&app, &token, "Beta Jeans").await;
+    let c = create_item(&app, &token, "Gamma Coat").await;
+
+    let payload = serde_json::to_vec(
+        &serde_json::json!({ "date": "2026-11-20", "notes": "original", "item_ids": [a, b] }),
+    )
+    .unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/outfits",
+            Some(&token),
+            payload,
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let outfit_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Swap B out for C: B loses its wear count, C gains one, A is untouched,
+    // and the date and notes move with the request.
+    let updated = patch_outfit(
+        &app,
+        &token,
+        &outfit_id,
+        &serde_json::json!({ "date": "2026-11-21", "notes": "edited", "item_ids": [a, c] }),
+    )
+    .await;
+    assert_eq!(updated["date"].as_str().unwrap(), "2026-11-21");
+    assert_eq!(updated["notes"].as_str().unwrap(), "edited");
+    assert_eq!(
+        updated["item_ids"].as_array().unwrap(),
+        &vec![serde_json::json!(a), serde_json::json!(c)]
+    );
+
+    let resp = call(
+        &app,
+        make_request("GET", "/db/clothing-items", Some(&token), vec![], None),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    for row in &rows {
+        let expected = match row["id"].as_str().unwrap() {
+            id if id == a => 1,
+            id if id == b => 0,
+            _ => 1,
+        };
+        assert_eq!(
+            row["wear_count"].as_i64(),
+            Some(expected),
+            "wear count for {}",
+            row["id"]
+        );
+    }
+
+    // Editing someone else's outfit, or a nonexistent one, is a 404.
+    let other = fresh_user(&app.pool).await;
+    let other_token = jwt(&other, "authenticated", TEST_ISSUER, 3600);
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/outfits/{outfit_id}"),
+            Some(&other_token),
+            serde_json::to_vec(&serde_json::json!({ "date": "2026-11-21", "item_ids": [a] }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            "/outfits/00000000-0000-0000-0000-000000000000",
+            Some(&token),
+            serde_json::to_vec(&serde_json::json!({ "date": "2026-11-21", "item_ids": [] }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Editing in an item the caller does not own is a 400.
+    let foreign_item = create_item(&app, &other_token, "Foreign Item").await;
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/outfits/{outfit_id}"),
+            Some(&token),
+            serde_json::to_vec(
+                &serde_json::json!({ "date": "2026-11-21", "item_ids": [a, foreign_item] }),
+            )
+            .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+async fn export_import_roundtrip_preserves_and_scopes_data() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    let exporter = fresh_user(&app.pool).await;
+    let exporter_token = jwt(&exporter, "authenticated", TEST_ISSUER, 3600);
+    let importer = fresh_user(&app.pool).await;
+    let importer_token = jwt(&importer, "authenticated", TEST_ISSUER, 3600);
+
+    // The exporter assembles a small wardrobe: a color, a category, an item
+    // with a photo in their own storage folder, and an outfit wearing it.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/colors",
+            Some(&exporter_token),
+            serde_json::to_vec(&serde_json::json!({ "id": "Navy", "hex_value": "#00112b" }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let row = body_json(resp).await;
+    assert_eq!(row["id"].as_str().unwrap(), "navy");
+    assert_eq!(row["user_id"].as_str().unwrap(), exporter.to_string());
+
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-categories",
+            Some(&exporter_token),
+            serde_json::to_vec(&serde_json::json!({ "name": "outerwear" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let category_id = body_json(resp).await["id"].as_i64().unwrap();
+
+    let item = create_item(&app, &exporter_token, "Navy Jacket").await;
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item}"),
+            Some(&exporter_token),
+            serde_json::to_vec(&serde_json::json!({
+                "color_id": "navy",
+                "category_id": category_id,
+                "image_path": format!("users/{exporter}/abcd-shot.jpg"),
+            }))
+            .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/outfits",
+            Some(&exporter_token),
+            serde_json::to_vec(&serde_json::json!({ "date": "2026-11-10", "item_ids": [item] }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The export carries the whole wardrobe, scoped to the exporter.
+    let resp = call(
+        &app,
+        make_request("GET", "/export", Some(&exporter_token), vec![], None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let doc = body_json(resp).await;
+    assert_eq!(doc["version"].as_i64().unwrap(), 1);
+    assert_eq!(doc["user_id"].as_str().unwrap(), exporter.to_string());
+    assert_eq!(doc["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        doc["outfits"].as_array().unwrap()[0]["item_ids"]
+            .as_array()
+            .unwrap(),
+        &vec![serde_json::json!(item)]
+    );
+    assert!(doc["colors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "navy"));
+    assert!(doc["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "outerwear"));
+
+    // The importer restores the document: rows are re-scoped to them, the
+    // photo is dropped (it lives in the exporter's storage folder), and wear
+    // counts come out of the links.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/import",
+            Some(&importer_token),
+            serde_json::to_vec(&doc).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "import failed: {}",
+        String::from_utf8_lossy(&body_bytes(resp).await)
+    );
+    let result = body_json(resp).await;
+    assert_eq!(result["items_imported"].as_i64().unwrap(), 1);
+    assert_eq!(result["outfits_imported"].as_i64().unwrap(), 1);
+    assert_eq!(result["links_added"].as_i64().unwrap(), 1);
+    assert_eq!(result["colors_created"].as_i64().unwrap(), 1);
+    assert_eq!(result["categories_created"].as_i64().unwrap(), 1);
+
+    let resp = call(
+        &app,
+        make_request(
+            "GET",
+            "/db/clothing-items",
+            Some(&importer_token),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(rows.len(), 1);
+    // The item's document id belongs to the exporter's account, so the
+    // importer's copy gets its own uuid (the old id is never reused).
+    let imported_item = rows[0]["id"].as_str().unwrap().to_string();
+    assert_ne!(imported_item, item);
+    assert_eq!(rows[0]["user_id"].as_str().unwrap(), importer.to_string());
+    assert_eq!(rows[0]["color_id"].as_str().unwrap(), "navy");
+    assert!(
+        rows[0]["image_path"].is_null(),
+        "cross-account images must not carry over"
+    );
+    assert_eq!(rows[0]["wear_count"].as_i64(), Some(1));
+    // The category resolved to the importer's own row, not the exporter's id.
+    let resp = call(
+        &app,
+        make_request(
+            "GET",
+            "/db/clothing-categories",
+            Some(&importer_token),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    let cats: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let importer_cat = cats.iter().find(|c| c["name"] == "outerwear").unwrap();
+    assert_eq!(rows[0]["category_id"].as_i64(), importer_cat["id"].as_i64());
+    assert_ne!(rows[0]["category_id"].as_i64(), Some(category_id));
+
+    let resp = call(
+        &app,
+        make_request("GET", "/outfits", Some(&importer_token), vec![], None),
+    )
+    .await;
+    let outfits: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(outfits.len(), 1);
+    // The outfit's link was remapped onto the importer's own copy of the item.
+    assert_eq!(
+        outfits[0]["item_ids"].as_array().unwrap(),
+        &vec![serde_json::json!(imported_item)]
+    );
+
+    // Re-importing the same document changes nothing: the item is recognised
+    // by name, the outfit by its date/notes/item set, and the link pair
+    // already exists.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/import",
+            Some(&importer_token),
+            serde_json::to_vec(&doc).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let result = body_json(resp).await;
+    assert_eq!(result["items_imported"].as_i64().unwrap(), 0);
+    assert_eq!(result["outfits_imported"].as_i64().unwrap(), 0);
+    assert_eq!(result["links_added"].as_i64().unwrap(), 0);
+    assert_eq!(result["colors_created"].as_i64().unwrap(), 0);
+    assert_eq!(result["categories_created"].as_i64().unwrap(), 0);
+
+    // Malformed documents are refused before anything is written.
+    let mut broken = doc.clone();
+    broken["outfits"][0]["item_ids"] = serde_json::json!(["11111111-1111-1111-1111-111111111111"]);
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/import",
+            Some(&importer_token),
+            serde_json::to_vec(&broken).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let mut dup = doc.clone();
+    dup["items"] = serde_json::json!([dup["items"][0].clone(), dup["items"][0].clone()]);
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/import",
+            Some(&importer_token),
+            serde_json::to_vec(&dup).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+async fn reference_data_is_scoped_and_manageable() {
+    let Some(app) = app().await else {
+        eprintln!("skipped: no test database");
+        return;
+    };
+    let a = fresh_user(&app.pool).await;
+    let token_a = jwt(&a, "authenticated", TEST_ISSUER, 3600);
+    let b = fresh_user(&app.pool).await;
+    let token_b = jwt(&b, "authenticated", TEST_ISSUER, 3600);
+
+    // A legacy shared color is visible to both users through the generic API.
+    sqlx::query("INSERT INTO colors (id, hex_value) VALUES ('shared-blue', NULL)")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    for token in [&token_a, &token_b] {
+        let resp = call(
+            &app,
+            make_request("GET", "/db/colors", Some(token), vec![], None),
+        )
+        .await;
+        let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert!(rows.iter().any(|c| c["id"] == "shared-blue"));
+    }
+
+    // Each user owns a 'navy' row of their own; the two coexist, and neither
+    // user's row shows up in the other's list.
+    for (token, owner) in [(&token_a, a), (&token_b, b)] {
+        let resp = call(
+            &app,
+            make_request(
+                "POST",
+                "/colors",
+                Some(token),
+                serde_json::to_vec(&serde_json::json!({ "id": "Navy" })).unwrap(),
+                Some("application/json"),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let row = body_json(resp).await;
+        assert_eq!(row["id"].as_str().unwrap(), "navy");
+        assert_eq!(row["user_id"].as_str().unwrap(), owner.to_string());
+    }
+    // Per-user counts: the two 'navy' rows coexist, each owned by its creator
+    // (a third 'navy' may exist from another scenario running in parallel).
+    for owner in [a, b] {
+        let count: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM colors WHERE id = 'navy' AND user_id = $1")
+                .bind(owner)
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+        assert_eq!(count.0, 1);
+    }
+
+    // Renaming an owned color re-points the owner's items; a slug that is
+    // already taken by the owner is a 409; other users cannot touch it (404).
+    let item = create_item(&app, &token_a, "Navy Tee").await;
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "color_id": "navy" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let _ = call(
+        &app,
+        make_request(
+            "POST",
+            "/colors",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "id": "midnight" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            "/colors/navy",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "id": "midnight" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            "/colors/navy",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "id": "deep-night" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = call(
+        &app,
+        make_request("GET", "/db/clothing-items", Some(&token_a), vec![], None),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(rows[0]["color_id"].as_str().unwrap(), "deep-night");
+
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            "/colors/deep-night",
+            Some(&token_b),
+            serde_json::to_vec(&serde_json::json!({ "id": "stolen" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Deleting an owned color nulls the owner's references and reports them.
+    let resp = call(
+        &app,
+        make_request("DELETE", "/colors/deep-night", Some(&token_a), vec![], None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["items_affected"].as_i64().unwrap(), 1);
+    let resp = call(
+        &app,
+        make_request("GET", "/db/clothing-items", Some(&token_a), vec![], None),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(rows[0]["color_id"].is_null());
+
+    // A shared color in use anywhere cannot be deleted; with no references it
+    // can, by anyone who can see it.
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "color_id": "shared-blue" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "DELETE",
+            "/colors/shared-blue",
+            Some(&token_a),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "color_id": null })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "DELETE",
+            "/colors/shared-blue",
+            Some(&token_b),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Categories: rename keeps the id (item references untouched), delete
+    // removes owned subcategories and nulls the owner's items, and a
+    // category with remaining subcategories refuses to go.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-categories",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "outerwear" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let category_id = body_json(resp).await["id"].as_i64().unwrap();
+
+    let resp = call(
+        &app,
+        make_request(
+            "GET",
+            "/db/clothing-categories",
+            Some(&token_b),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(!rows.iter().any(|c| c["name"] == "outerwear"));
+
+    let item2 = create_item(&app, &token_a, "Rain Shell").await;
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item2}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "category_id": category_id })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/clothing-categories/{category_id}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "jackets" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["id"].as_i64().unwrap(), category_id);
+    let resp = call(
+        &app,
+        make_request("GET", "/db/clothing-items", Some(&token_a), vec![], None),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(rows[0]["category_id"].as_i64().unwrap(), category_id);
+
+    // A subcategory under it: deleting the category takes the subcategory and
+    // clears both references from the owner's item.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-subcategories",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "parka", "category_id": category_id }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sub_id = body_json(resp).await["id"].as_i64().unwrap();
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item2}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "subcategory_id": sub_id })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "DELETE",
+            &format!("/clothing-categories/{category_id}"),
+            Some(&token_a),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "delete category failed: {}",
+        String::from_utf8_lossy(&body_bytes(resp).await)
+    );
+    let result = body_json(resp).await;
+    assert_eq!(result["items_affected"].as_i64().unwrap(), 1);
+    assert_eq!(result["subcategories_deleted"].as_i64().unwrap(), 1);
+    let resp = call(
+        &app,
+        make_request("GET", "/db/clothing-items", Some(&token_a), vec![], None),
+    )
+    .await;
+    let rows: Vec<Value> = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert!(rows[0]["category_id"].is_null());
+    assert!(rows[0]["subcategory_id"].is_null());
+
+    // A subcategory can move to another of the owner's categories, but not to
+    // a category owned by someone else.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-categories",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "bottoms" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let bottoms = body_json(resp).await["id"].as_i64().unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-categories",
+            Some(&token_b),
+            serde_json::to_vec(&serde_json::json!({ "name": "b-outerwear" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let b_category = body_json(resp).await["id"].as_i64().unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/clothing-subcategories",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "jeans", "category_id": bottoms }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let jeans = body_json(resp).await["id"].as_i64().unwrap();
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/clothing-subcategories/{jeans}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "denim", "category_id": b_category }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/clothing-subcategories/{jeans}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "denim", "category_id": bottoms }))
+                .unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["name"].as_str().unwrap(), "denim");
+
+    // Brands: created through the dedicated endpoint (user_id forced),
+    // managed through it and the rename/delete endpoints, scoped the same
+    // way as the other reference tables.
+    let resp = call(
+        &app,
+        make_request(
+            "POST",
+            "/brands",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "name": "Acme" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let brand_row = body_json(resp).await;
+    let brand = brand_row["id"].as_str().unwrap().to_string();
+    assert_eq!(brand_row["user_id"].as_str().unwrap(), a.to_string());
+    let resp = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/brands/{brand}"),
+            Some(&token_b),
+            serde_json::to_vec(&serde_json::json!({ "name": "Stolen" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let item3 = create_item(&app, &token_a, "Acme Boots").await;
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item3}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "brand_id": brand })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request(
+            "DELETE",
+            &format!("/brands/{brand}"),
+            Some(&token_a),
+            vec![],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["items_affected"].as_i64().unwrap(), 1);
+
+    // The usage endpoint reports per-row reference counts for the caller.
+    let _ = call(
+        &app,
+        make_request(
+            "POST",
+            "/colors",
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "id": "counted" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let _ = call(
+        &app,
+        make_request(
+            "PATCH",
+            &format!("/db/clothing-items/{item3}"),
+            Some(&token_a),
+            serde_json::to_vec(&serde_json::json!({ "color_id": "counted" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    let resp = call(
+        &app,
+        make_request("GET", "/reference-usage", Some(&token_a), vec![], None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let usage = body_json(resp).await;
+    assert_eq!(usage["colors"]["counted"].as_i64().unwrap(), 1);
+    assert_eq!(
+        usage["categories"]["bottoms".to_string()].as_i64().unwrap(),
+        0
+    );
+    // Unreferenced but still visible to the owner.
+    assert_eq!(usage["colors"]["midnight"].as_i64().unwrap(), 0);
+    // B's own color never appears in A's usage counts.
+    let _ = call(
+        &app,
+        make_request(
+            "POST",
+            "/colors",
+            Some(&token_b),
+            serde_json::to_vec(&serde_json::json!({ "id": "b-only" })).unwrap(),
+            Some("application/json"),
+        ),
+    )
+    .await;
+    assert!(!usage["colors"].as_object().unwrap().contains_key("b-only"));
+}
+
+// ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
 
@@ -2026,6 +2906,12 @@ fn integration_suite() {
             "outfit_validation",
             outfit_validation_rejects_foreign_and_malformed_items()
         );
+        scenario!("outfit_edit", outfit_edit_updates_fields_and_wear_counts());
+        scenario!(
+            "export_import",
+            export_import_roundtrip_preserves_and_scopes_data()
+        );
+        scenario!("reference_data", reference_data_is_scoped_and_manageable());
         scenario!("settings", settings_roundtrip_encrypts_api_keys());
         scenario!(
             "discord_code",

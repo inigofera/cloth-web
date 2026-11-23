@@ -1,6 +1,8 @@
 // E2E stub: a fake Supabase GoTrue auth endpoint and a fake cloth-web API.
 //
-// Both are deliberately thin — only the surface the five smoke flows touch.
+// Both are deliberately thin — only the surface the smoke flows touch,
+// plus the M5 endpoints (outfit edit, export/import, reference usage and
+// rename/delete) that the settings page loads on mount.
 // The auth stub lives on :5433 (the value VITE_SUPABASE_URL is pointed at),
 // the API stub on :3000 (where vite's dev proxy forwards /api).
 //
@@ -411,6 +413,212 @@ async function handleApi(req, res) {
     const color = { id, hex_value: payload.hex_value || null };
     state.colors.push(color);
     return sendJson(res, 200, color);
+  }
+  if (path === '/brands' && method === 'POST') {
+    const payload = json();
+    const brand = { id: crypto.randomUUID(), name: payload.name || 'New Brand', user_id: USER.id };
+    state.brands.push(brand);
+    return sendJson(res, 200, brand);
+  }
+
+  // M5 surface: outfit editing, export/import, reference usage and the
+  // dedicated rename/delete endpoints. Thin mirrors of the real handlers —
+  // enough for the settings page to load and the flows to exercise them.
+  if (outfitDelete && method === 'PATCH') {
+    const idx = state.outfits.findIndex((o) => o.id === outfitDelete[1]);
+    if (idx === -1) return sendJson(res, 404, 'not found');
+    const payload = json();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(payload.date || '')) return sendJson(res, 400, 'invalid date');
+    const ids = Array.isArray(payload.item_ids) ? payload.item_ids : [];
+    for (const id of ids) {
+      if (!state.items.some((i) => i.id === id)) {
+        return sendJson(res, 400, `item ${id} is not in your wardrobe`);
+      }
+    }
+    // Wear counts follow the link diff, like the real handler.
+    const prev = new Set(state.outfits[idx].item_ids || []);
+    const next = new Set(ids);
+    for (const item of state.items) {
+      if (next.has(item.id) && !prev.has(item.id)) item.wear_count = (item.wear_count || 0) + 1;
+      else if (prev.has(item.id) && !next.has(item.id)) item.wear_count = Math.max(0, (item.wear_count || 0) - 1);
+    }
+    state.outfits[idx] = {
+      ...state.outfits[idx],
+      date: payload.date,
+      notes: payload.notes ?? null,
+      image_path: payload.image_path ?? null,
+      item_ids: ids,
+      updated_at: nowIso(),
+    };
+    return sendJson(res, 200, state.outfits[idx]);
+  }
+
+  if (method === 'GET' && path === '/export') {
+    return sendJson(
+      res,
+      200,
+      {
+        version: 1,
+        exported_at: nowIso(),
+        user_id: USER.id,
+        items: state.items,
+        outfits: state.outfits,
+        colors: state.colors,
+        categories: state.categories,
+        subcategories: state.subcategories,
+        brands: state.brands,
+      },
+      { 'content-disposition': 'attachment; filename="cloth-web-export.json"' },
+    );
+  }
+
+  if (method === 'POST' && path === '/import') {
+    const doc = json();
+    const result = {
+      items_imported: 0,
+      outfits_imported: 0,
+      links_added: 0,
+      colors_created: 0,
+      categories_created: 0,
+      subcategories_created: 0,
+      brands_created: 0,
+    };
+    for (const c of doc.colors || []) {
+      if (c && c.id && !state.colors.some((x) => x.id === c.id)) {
+        state.colors.push({ id: c.id, hex_value: c.hex_value ?? null });
+        result.colors_created += 1;
+      }
+    }
+    for (const c of doc.categories || []) {
+      if (c && c.name && !state.categories.some((x) => x.name.toLowerCase() === c.name.toLowerCase())) {
+        const nextId = state.categories.length ? Math.max(...state.categories.map((x) => x.id)) + 1 : 1;
+        state.categories.push({ id: nextId, name: c.name });
+        result.categories_created += 1;
+      }
+    }
+    for (const s of doc.subcategories || []) {
+      if (s && s.name && !state.subcategories.some((x) => x.name.toLowerCase() === s.name.toLowerCase())) {
+        const nextId = state.subcategories.length ? Math.max(...state.subcategories.map((x) => x.id)) + 1 : 1;
+        state.subcategories.push({ id: nextId, name: s.name, category_id: s.category_id || 1 });
+        result.subcategories_created += 1;
+      }
+    }
+    for (const b of doc.brands || []) {
+      if (b && b.name && !state.brands.some((x) => x.name.toLowerCase() === b.name.toLowerCase())) {
+        state.brands.push({ id: crypto.randomUUID(), name: b.name, user_id: USER.id });
+        result.brands_created += 1;
+      }
+    }
+    for (const item of doc.items || []) {
+      if (item && item.id && !state.items.some((x) => x.id === item.id)) {
+        state.items.push({ ...item, user_id: USER.id });
+        result.items_imported += 1;
+      }
+    }
+    for (const o of doc.outfits || []) {
+      if (o && o.id && !state.outfits.some((x) => x.id === o.id)) {
+        state.outfits.push({ ...o, user_id: USER.id, updated_at: nowIso() });
+        result.outfits_imported += 1;
+        result.links_added += (o.item_ids || []).length;
+      }
+    }
+    return sendJson(res, 200, result);
+  }
+
+  if (method === 'GET' && path === '/reference-usage') {
+    const usage = { colors: {}, categories: {}, subcategories: {}, brands: {} };
+    for (const c of state.colors) usage.colors[c.id] = 0;
+    for (const c of state.categories) usage.categories[c.name] = 0;
+    for (const s of state.subcategories) usage.subcategories[s.name] = 0;
+    for (const b of state.brands) usage.brands[b.name] = 0;
+    for (const item of state.items) {
+      if (item.color_id && item.color_id in usage.colors) usage.colors[item.color_id] += 1;
+      const cat = state.categories.find((c) => c.id === item.category_id);
+      if (cat) usage.categories[cat.name] = (usage.categories[cat.name] || 0) + 1;
+      const sub = state.subcategories.find((s) => s.id === item.subcategory_id);
+      if (sub) usage.subcategories[sub.name] = (usage.subcategories[sub.name] || 0) + 1;
+      const brand = state.brands.find((b) => b.id === item.brand_id);
+      if (brand) usage.brands[brand.name] = (usage.brands[brand.name] || 0) + 1;
+    }
+    return sendJson(res, 200, usage);
+  }
+
+  const colorRef = path.match(/^\/colors\/([^/]+)$/);
+  if (colorRef) {
+    const color = state.colors.find((c) => c.id === colorRef[1]);
+    if (!color) return sendJson(res, 404, 'color not found');
+    if (method === 'PATCH') {
+      const payload = json();
+      const inUse = state.items.filter((i) => i.color_id === color.id).length;
+      if (inUse > 0 && !color.user_id) return sendJson(res, 409, 'color is in use');
+      const taken = state.colors.some((c) => c.id === (payload.id || '').toLowerCase() && c.id !== color.id);
+      if (taken) return sendJson(res, 409, 'color slug already exists');
+      for (const item of state.items) if (item.color_id === color.id) item.color_id = (payload.id || '').toLowerCase();
+      color.id = (payload.id || '').toLowerCase();
+      return sendJson(res, 200, color);
+    }
+    if (method === 'DELETE') {
+      const inUse = state.items.filter((i) => i.color_id === color.id).length;
+      if (inUse > 0) return sendJson(res, 409, 'color is in use');
+      state.colors = state.colors.filter((c) => c.id !== color.id);
+      return sendJson(res, 200, { deleted: true, items_affected: 0 });
+    }
+  }
+  const categoryRef = path.match(/^\/clothing-categories\/([^/]+)$/);
+  if (categoryRef) {
+    const category = state.categories.find((c) => c.id === Number(categoryRef[1]));
+    if (!category) return sendJson(res, 404, 'category not found');
+    if (method === 'PATCH') {
+      const payload = json();
+      category.name = payload.name || category.name;
+      return sendJson(res, 200, category);
+    }
+    if (method === 'DELETE') {
+      const inUse = state.items.filter((i) => i.category_id === category.id).length;
+      state.categories = state.categories.filter((c) => c.id !== category.id);
+      state.subcategories = state.subcategories.filter((s) => s.category_id !== category.id);
+      for (const item of state.items) {
+        if (item.category_id === category.id) item.category_id = null;
+      }
+      return sendJson(res, 200, { deleted: true, items_affected: inUse });
+    }
+  }
+  const subcategoryRef = path.match(/^\/clothing-subcategories\/([^/]+)$/);
+  if (subcategoryRef) {
+    const sub = state.subcategories.find((s) => s.id === Number(subcategoryRef[1]));
+    if (!sub) return sendJson(res, 404, 'subcategory not found');
+    if (method === 'PATCH') {
+      const payload = json();
+      sub.name = payload.name || sub.name;
+      if (payload.category_id != null) sub.category_id = payload.category_id;
+      return sendJson(res, 200, sub);
+    }
+    if (method === 'DELETE') {
+      const inUse = state.items.filter((i) => i.subcategory_id === sub.id).length;
+      state.subcategories = state.subcategories.filter((s) => s.id !== sub.id);
+      for (const item of state.items) {
+        if (item.subcategory_id === sub.id) item.subcategory_id = null;
+      }
+      return sendJson(res, 200, { deleted: true, items_affected: inUse });
+    }
+  }
+  const brandRef = path.match(/^\/brands\/([^/]+)$/);
+  if (brandRef) {
+    const brand = state.brands.find((b) => b.id === brandRef[1]);
+    if (!brand) return sendJson(res, 404, 'brand not found');
+    if (method === 'PATCH') {
+      const payload = json();
+      brand.name = payload.name || brand.name;
+      return sendJson(res, 200, brand);
+    }
+    if (method === 'DELETE') {
+      const inUse = state.items.filter((i) => i.brand_id === brand.id).length;
+      state.brands = state.brands.filter((b) => b.id !== brand.id);
+      for (const item of state.items) {
+        if (item.brand_id === brand.id) item.brand_id = null;
+      }
+      return sendJson(res, 200, { deleted: true, items_affected: inUse });
+    }
   }
 
   return sendJson(res, 404, `no stub route for ${method} ${path}`);

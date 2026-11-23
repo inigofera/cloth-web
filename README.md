@@ -15,10 +15,10 @@ virtual try-on, backed by Supabase (Postgres + Storage).
 | Tab | What it does |
 |-----|--------------|
 | **Clothes** | Wardrobe grid with search and category filters, add/edit form (inline creation of colors, categories, subcategories, brands), image upload, deactivate with undo, and deep-linkable item details. |
-| **Outfits** | Calendar outfit logger. Today is preselected; the item picker is recency-sorted. Supports outfit photos and a virtual try-on preview, plus Discord sync of logged outfits. |
+| **Outfits** | Calendar outfit logger. Today is preselected; the item picker is recency-sorted. Supports outfit photos and a virtual try-on preview, in-place outfit editing (date, notes, garments, photo — wear counts follow the link diff), and Discord sync of logged outfits. |
 | **Insights** | Analytics dashboard with 19 configurable widget types (usage, wardrobe, value, sustainability, relationships, callouts). Widgets are reorderable by drag or keyboard, globally filterable (date range, category, color, brand, active-only), and the layout persists per browser. |
 | **Tables** | Developer-facing PostgreSQL schema explorer. |
-| **Settings** | Try-on configuration: provider selection (Gemini BYOK or local Qwen), API key, full-body reference photo, connection test, and Discord account linking. |
+| **Settings** | Try-on configuration: provider selection (Gemini BYOK or local Qwen), API key, full-body reference photo, connection test, and Discord account linking — plus whole-wardrobe JSON export/import and rename/delete management of the reference data (colors, categories, subcategories, brands). |
 
 ## Endpoints
 
@@ -28,13 +28,21 @@ virtual try-on, backed by Supabase (Postgres + Storage).
 | `/tables` | GET | List public tables with columns and types |
 | `/db/:table` | GET / POST | Read rows (`?limit=`, `?offset=`; up to 10,000 rows; total reported via `X-Total-Count` header) / insert a row |
 | `/db/:table/:id` | PATCH / DELETE | Update / delete a row (user-scoped tables only) |
-| `/colors` | POST | Create a color (reference data) |
+| `/colors` | POST | Create a color (slug, optional hex); an existing caller-visible row with the same slug is returned as-is |
+| `/colors/:id` | PATCH / DELETE | Rename (slug) or delete a color. Renaming re-points the referencing items (the caller's, or all items for a shared row); deleting an owned row clears the color from the caller's items, a shared row only while nothing anywhere references it (409) |
 | `/clothing-categories` | POST | Create a category (reference data) |
+| `/clothing-categories/:id` | PATCH / DELETE | Rename, or delete, a category. Deleting also drops its subcategories and clears the category (and subcategory) from the caller's items; a shared category only while unreferenced anywhere (409) |
 | `/clothing-subcategories` | POST | Create a subcategory (reference data) |
+| `/clothing-subcategories/:id` | PATCH / DELETE | Rename/move, or delete, a subcategory; deleting clears it from the caller's items, a shared one only while unreferenced anywhere (409) |
+| `/brands` | POST | Create a brand (case-insensitive: an existing caller-visible brand with the same name is returned as-is) |
+| `/brands/:id` | PATCH / DELETE | Rename, or delete, a brand; deleting clears the brand from the caller's items, a shared one only while unreferenced anywhere (409) |
 | `/outfits` | GET / POST | List outfits (`?limit=`, `?offset=`, `X-Total-Count`) / create an outfit (transactionally increments wear counts) |
-| `/outfits/:id` | DELETE | Delete an outfit (transactionally decrements wear counts) |
+| `/outfits/:id` | PATCH / DELETE | Full-replacement outfit edit (date, notes, item list, photo; the link diff adjusts wear counts transactionally) / delete an outfit (transactionally decrements wear counts) |
 | `/outfits/generate-preview` | POST | Generate a virtual try-on image for the selected items |
 | `/outfits/discord-sync` | POST | Import outfits logged via Discord |
+| `/export` | GET | Download the caller's wardrobe as a versioned JSON file (items, outfits with their item links, and the caller's visible colors, categories, subcategories, brands) |
+| `/import` | POST | Restore an exported JSON file: reference rows are de-duplicated (colors by slug, the rest by name) and created as owned rows when absent; items/outfits are de-duplicated per account (a re-import of the same file is a no-op); wear counts are recomputed from the links |
+| `/reference-usage` | GET | Per-row reference counts (color by slug; category/subcategory/brand by name) over the caller's items, for the Settings reference manager |
 | `/settings` | GET / PUT | Read / update the user's settings (API key stored AES-256-GCM encrypted; provider, local Qwen URL, reference photo, Discord link) |
 | `/settings/test-qwen` | GET | Probe the configured local Qwen server |
 | `/settings/discord-code` | POST | Generate a Discord account link code |
@@ -43,7 +51,7 @@ virtual try-on, backed by Supabase (Postgres + Storage).
 | `/files/sign` | GET | Issue the caller a short-lived (10 min) signed token for referencing their own images from `<img>` tags |
 | `/files/*path` | GET | Serve the user's own stored images, with optional `?width=` resizing (capped at 4096px). Auth via Bearer JWT, or `?token=<signed>&exp=<unix>` from `/files/sign` — JWTs are never placed in URLs |
 
-Tables with a `user_id` column are scoped to the authenticated user; tables without one are shared reference data (read-only). The `user-settings` table is explicitly blocked from the generic `/db/:table` endpoints and only reachable through `/settings`.
+Tables with a `user_id` column are scoped to the authenticated user. Reference data is owned per user: rows with a `user_id` are visible to and manageable only by their owner, while rows with a `NULL` `user_id` are legacy shared defaults readable by everyone and manageable only through the dedicated endpoints (which re-point or gate them across all users). Writes to `outfits` and the four reference tables must go through their dedicated endpoints — the generic CRUD layer answers `405` for them, pointing at the right endpoint. The `user-settings` table is explicitly blocked from the generic `/db/:table` endpoints and only reachable through `/settings`.
 
 ## Environment variables
 
@@ -63,7 +71,7 @@ QWEN_TIMEOUT_SECONDS         # local try-on request timeout (default: 300)
 DISCORD_BOT_TOKEN            # Discord bot token (optional; enables Discord import)
 DISCORD_CHANNEL_ID           # Discord channel to import outfits from (optional)
 DISCORD_CREATOR_ID           # Discord user id auto-linked on first message (optional)
-DISCORD_DEFAULT_USER_ID      # app user id the startup sweep imports for (optional)
+DISCORD_DEFAULT_USER_ID      # app user id the startup sweep imports for (required whenever DISCORD_BOT_TOKEN is set — the backend panics at startup otherwise)
 RUST_LOG                     # tracing filter, e.g. "info" or "backend=debug" (default: info)
 ```
 
@@ -97,7 +105,7 @@ Generated images pass through the same sanitization/normalization pipeline as up
 
 ## Discord integration (optional)
 
-With a bot token and channel configured, users can link their Discord account in Settings (6-digit code, valid 15 minutes) and import outfit logs posted in the channel. After five failed `!link` attempts a Discord user is locked out of the link flow for one hour. A startup sweep also imports any new messages.
+With a bot token and channel configured, users can link their Discord account in Settings (6-digit code, valid 15 minutes) and import outfit logs posted in the channel. After five failed `!link` attempts a Discord user is locked out of the link flow for one hour. A startup sweep also imports any new messages — for the user named in `DISCORD_DEFAULT_USER_ID`, which is therefore required whenever the bot is enabled (the backend refuses to start otherwise).
 
 ## Database migrations
 
@@ -112,6 +120,7 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 | `20261026000000_add_discord_integration.sql` | Discord link columns on `user-settings` |
 | `20261105000000_index_user_scoped_tables.sql` | `(user_id)` and `(user_id, created_at DESC)` indexes on all user-scoped tables |
 | `20261119000000_discord_link_rate_limit.sql` | `discord-link-attempts` table: failed `!link` counts and 1-hour lockout (blocked from the generic API) |
+| `20261123000000_scope_reference_data.sql` | scopes reference data per user: nullable `user_id` on `colors`, `clothing-categories` and `clothing-subcategories` (`NULL` = legacy shared row), `UNIQUE (user_id, id)` on colors, the items→colors FK dropped (integrity now carried by the app), RLS policies mirroring `brands`, and backfill of legacy rows to their sole referencing user |
 
 ## Build and run
 
@@ -134,6 +143,6 @@ Migrations live in `supabase/migrations/` (apply them when setting up the Supaba
 ## Testing
 
 - **Backend** (`cargo test`): unit tests covering filename sanitization, magic-byte sniffing, per-user storage keys and path authorization, AES-256-GCM round-trips, SSRF URL validation, image cache, and Discord message parsing.
-- **Backend integration** (`cargo test --test integration`): the real router against a real Postgres — the full migration chain applied to a clean schema, with Supabase Storage, the Gemini REST endpoint, and the local Qwen worker all mocked in-process. Covers auth rejections, generic CRUD scoping, outfit lifecycle, settings encryption, the signed file-token flow, upload validation, rate limiting, paging, and both try-on provider paths (dispatch, request content, validation 400s, storage + thumbnails). Skipped automatically when no test database is reachable; point it at one with `CLOTHWEB_TEST_DATABASE_URL` (CI provides a disposable `cloth_test` database via a service container).
+- **Backend integration** (`cargo test --test integration`): the real router against a real Postgres — the full migration chain applied to a clean schema, with Supabase Storage, the Gemini REST endpoint, and the local Qwen worker all mocked in-process. Covers auth rejections, generic CRUD scoping (including the 405 guard on dedicated-write tables), outfit lifecycle, in-place outfit editing with wear-count deltas, JSON export/import (cross-account re-scoping, idempotent re-import), reference-data scoping and rename/delete re-pointing (shared vs owned rows), settings encryption, the signed file-token flow, upload validation, rate limiting, paging, and both try-on provider paths (dispatch, request content, validation 400s, storage + thumbnails). Skipped automatically when no test database is reachable; point it at one with `CLOTHWEB_TEST_DATABASE_URL` (CI provides a disposable `cloth_test` database via a service container).
 - **Frontend** (`npm test`): Vitest suites for date/timezone handling, error classification, routing, sanitizers, the undo manager, insights metrics, layout persistence, widget smoke tests, picker recency ordering, and the signed-image URL client.
 - **Frontend e2e** (`npm run test:e2e`): a Playwright smoke suite in `frontend/e2e/` (kept out of the Vitest run) driving the five critical flows against `vite dev` with a stubbed Supabase auth endpoint and stubbed backend: login, add item with image upload, log an outfit, insights render, and settings save/provider switch. Runs in CI as its own job.

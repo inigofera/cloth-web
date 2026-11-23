@@ -158,19 +158,32 @@
                   </button>
                 </div>
               </div>
-              <button
-                v-else
-                type="button"
-                class="delete-btn"
-                @click="confirmingDeleteId = outfit.id"
-              >
-                Delete
-              </button>
+              <div v-else class="card-actions">
+                <button
+                  type="button"
+                  class="edit-btn"
+                  @click="startEdit(outfit)"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  class="delete-btn"
+                  @click="confirmingDeleteId = outfit.id"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           </div>
 
           <form class="add-form" @submit.prevent="submitOutfit">
-            <h4>Add outfit</h4>
+            <h4>{{ editingOutfitId ? 'Edit outfit' : 'Add outfit' }}</h4>
+
+            <label v-if="editingOutfitId" class="field">
+              <span class="field-label">Date</span>
+              <input v-model="editDate" type="date" />
+            </label>
 
             <label class="field">
               <span class="field-label">Notes</span>
@@ -330,11 +343,17 @@
               <button
                 type="submit"
                 class="primary"
-                :disabled="saving || (selectedItems.length === 0 && !notes.trim())"
+                :disabled="saving || (!editingOutfitId && selectedItems.length === 0 && !notes.trim())"
               >
-                {{ saving ? 'Saving…' : 'Add outfit' }}
+                {{ saving ? 'Saving…' : (editingOutfitId ? 'Save changes' : 'Add outfit') }}
               </button>
-              <button type="button" class="secondary" @click="closeForm">Cancel</button>
+              <button
+                type="button"
+                class="secondary"
+                @click="editingOutfitId ? cancelEdit() : closeForm()"
+              >
+                Cancel
+              </button>
             </div>
           </form>
         </template>
@@ -634,6 +653,30 @@ const notes = ref('');
 const selectedItems = ref<string[]>([]);
 const saving = ref(false);
 const formError = ref<string | null>(null);
+// Edit mode: the add form becomes a full-replacement edit of the named
+// outfit. Its date is editable independently of the calendar selection.
+const editingOutfitId = ref<string | null>(null);
+const editDate = ref('');
+
+function startEdit(outfit: Outfit) {
+  editingOutfitId.value = outfit.id;
+  editDate.value = parseOutfitDateKey(outfit.date);
+  notes.value = outfit.notes ?? '';
+  selectedItems.value = [...outfit.item_ids];
+  formError.value = null;
+  generatedImagePath.value = null;
+  generationError.value = null;
+}
+
+function cancelEdit() {
+  editingOutfitId.value = null;
+  editDate.value = '';
+  notes.value = '';
+  selectedItems.value = [];
+  formError.value = null;
+  generatedImagePath.value = null;
+  generationError.value = null;
+}
 
 // A draft selection may survive in this kept-alive view after the item is
 // deleted in the Clothes tab. Drop ids that no longer exist so the form cannot
@@ -895,6 +938,8 @@ function closeForm() {
   generatedImagePath.value = null;
   generationError.value = null;
   isGeneratingPreview.value = false;
+  editingOutfitId.value = null;
+  editDate.value = '';
 }
 
 function firstItemImage(outfit: Outfit, width: number): string | null {
@@ -927,10 +972,26 @@ function chipTitle(outfit: Outfit): string {
 }
 
 async function submitOutfit() {
-  if (!selectedDate.value) return;
-  saving.value = true;
   formError.value = null;
+  saving.value = true;
   try {
+    if (editingOutfitId.value) {
+      // Full-replacement update: the server diffs the links and moves wear
+      // counts; the store mirrors the same deltas in replaceOutfit.
+      const target = outfits.value.find(o => o.id === editingOutfitId.value);
+      const updated = await api.updateOutfit(editingOutfitId.value, {
+        date: editDate.value,
+        notes: sanitizeText(notes.value, { max: OUTFIT_NOTES_MAX }) || null,
+        item_ids: selectedItems.value,
+        image_path: generatedImagePath.value || target?.image_path || null
+      });
+      wardrobe.replaceOutfit(updated);
+      cancelEdit();
+      toastMessage.value = 'Outfit updated.';
+      showToast.value = true;
+      return;
+    }
+    if (!selectedDate.value) return;
     const created = await api.createOutfit({
       date: selectedDate.value,
       notes: sanitizeText(notes.value, { max: OUTFIT_NOTES_MAX }) || null,
@@ -1227,7 +1288,6 @@ onUnmounted(() => {
 }
 
 .delete-btn {
-  margin-top: 0.5rem;
   font-size: 0.75rem;
   color: #c0392b;
   background: none;
@@ -1239,6 +1299,26 @@ onUnmounted(() => {
 
 .delete-btn:hover {
   background: #fdecea;
+}
+
+.card-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.edit-btn {
+  font-size: 0.75rem;
+  color: #1d4ed8;
+  background: none;
+  border: 1px solid #c3d3f5;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.edit-btn:hover {
+  background: #e8eefb;
 }
 
 .confirm-delete {

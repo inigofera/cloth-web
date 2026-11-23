@@ -498,17 +498,24 @@ pub async fn sync_discord_for_user(
     .await
     .unwrap_or_default();
 
+    // Same shared-or-owned scope as the known_brands query above: the sync
+    // only infers metadata from reference rows the syncing user can see.
     let known_subcats = sqlx::query_as::<_, SubcategoryRef>(
-        r#"SELECT id, name, category_id FROM "clothing-subcategories""#,
+        r#"SELECT id, name, category_id FROM "clothing-subcategories"
+           WHERE user_id = $1 OR user_id IS NULL"#,
     )
+    .bind(user_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
-    let known_colors = sqlx::query_as::<_, ColorRef>(r#"SELECT id FROM colors"#)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let known_colors = sqlx::query_as::<_, ColorRef>(
+        r#"SELECT id FROM colors WHERE user_id = $1 OR user_id IS NULL"#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
 
     let mut imported_count = 0;
     let mut messages_processed = 0;

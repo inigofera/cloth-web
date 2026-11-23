@@ -7,11 +7,16 @@ import type {
   ColumnInfo,
   CreateClothingItemPayload,
   CreateOutfitPayload,
+  ExportDocument,
   GeneratePreviewResponse,
+  ImportResult,
   JsonValue,
   Outfit,
+  ReferenceUsage,
+  UpdateOutfitPayload,
   UpdateUserSettingsPayload,
-  UserSettings
+  UserSettings,
+  UUID
 } from './types';
 import { supabase } from '../lib/supabase';
 import { isValidObjectPath } from '../lib/sanitize';
@@ -121,6 +126,36 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> 
 }
 
 /**
+ * Authenticated download: the export endpoint streams a JSON file with a
+ * Content-Disposition, and `<a download>` cannot send auth headers, so the
+ * blob is fetched here (same 401-refresh path as the JSON calls) and saved
+ * client-side.
+ */
+async function fetchBlobWithRetry(input: RequestInfo, init?: RequestInit): Promise<Blob> {
+  let { data } = await supabase.auth.getSession();
+  const headers = new Headers(init?.headers);
+  if (data.session) {
+    headers.set('Authorization', `Bearer ${data.session.access_token}`);
+  }
+
+  let res = await fetch(input, { ...init, headers });
+  if (res.status === 401) {
+    const { data: refreshData } = await supabase.auth.refreshSession();
+    if (refreshData.session) {
+      syncToken(refreshData.session);
+      headers.set('Authorization', `Bearer ${refreshData.session.access_token}`);
+      res = await fetch(input, { ...init, headers });
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ''}`);
+  }
+  return res.blob();
+}
+
+/**
  * Read the `X-Total-Count` header set by list endpoints (UX_ANALYSIS.md P1-B1):
  * it tells the UI how much data actually exists so a capped snapshot can be
  * surfaced honestly instead of silently hidden.
@@ -203,10 +238,20 @@ export const api = {
     `${API_BASE}/outfits`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
   ),
+  updateOutfit: (id: string, data: UpdateOutfitPayload) => fetchJson<Outfit>(
+    `${API_BASE}/outfits/${encodeURIComponent(id)}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
   deleteOutfit: (id: string) => fetchJson<JsonValue>(
     `${API_BASE}/outfits/${encodeURIComponent(id)}`,
     { method: 'DELETE' }
   ),
+  exportData: () => fetchBlobWithRetry(`${API_BASE}/export`),
+  importData: (doc: ExportDocument) => fetchJson<ImportResult>(
+    `${API_BASE}/import`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(doc) }
+  ),
+  referenceUsage: () => fetchJson<ReferenceUsage>(`${API_BASE}/reference-usage`),
   listClothingItems: () => fetchJson<ClothingItem[]>(`${API_BASE}/db/clothing-items`),
   createClothingItem: (data: CreateClothingItemPayload) => fetchJson<ClothingItem>(
     `${API_BASE}/db/clothing-items`,
@@ -227,6 +272,48 @@ export const api = {
   createSubcategory: (data: { name: string; category_id: number }) => fetchJson<ClothingSubcategory>(
     `${API_BASE}/clothing-subcategories`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  createBrand: (data: { name: string }) => fetchJson<Brand>(
+    `${API_BASE}/brands`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  // Dedicated rename/delete endpoints for reference data. Each renames or
+  // removes the caller's row (or a shared one, per the server's rules) and
+  // returns the row it acted on, so the store can mirror it locally.
+  renameColor: (id: string, data: { id: string }) => fetchJson<Color>(
+    `${API_BASE}/colors/${encodeURIComponent(id)}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  deleteColor: (id: string) => fetchJson<JsonValue>(
+    `${API_BASE}/colors/${encodeURIComponent(id)}`,
+    { method: 'DELETE' }
+  ),
+  renameCategory: (id: number, data: { name: string }) => fetchJson<ClothingCategory>(
+    `${API_BASE}/clothing-categories/${id}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  deleteCategory: (id: number) => fetchJson<JsonValue>(
+    `${API_BASE}/clothing-categories/${id}`,
+    { method: 'DELETE' }
+  ),
+  renameSubcategory: (
+    id: number,
+    data: { name: string; category_id?: number | null }
+  ) => fetchJson<ClothingSubcategory>(
+    `${API_BASE}/clothing-subcategories/${id}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  deleteSubcategory: (id: number) => fetchJson<JsonValue>(
+    `${API_BASE}/clothing-subcategories/${id}`,
+    { method: 'DELETE' }
+  ),
+  renameBrand: (id: UUID, data: { name: string }) => fetchJson<Brand>(
+    `${API_BASE}/brands/${encodeURIComponent(id)}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+  ),
+  deleteBrand: (id: UUID) => fetchJson<JsonValue>(
+    `${API_BASE}/brands/${encodeURIComponent(id)}`,
+    { method: 'DELETE' }
   ),
   getSettings: () => fetchJson<UserSettings>(`${API_BASE}/settings`),
   updateSettings: (payload: UpdateUserSettingsPayload) => fetchJson<UserSettings>(

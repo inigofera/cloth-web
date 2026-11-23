@@ -398,6 +398,199 @@ uvicorn server:app --host 127.0.0.1 --port 8001</code></pre>
           </div>
         </div>
       </section>
+
+      <!-- Section 4: Your Data (JSON export / import) -->
+      <section class="settings-card">
+        <div class="card-header">
+          <div class="card-title-group">
+            <h2 class="card-title">Your Data</h2>
+          </div>
+          <p class="card-description">
+            Export your whole wardrobe (items, outfits and your colors, categories,
+            subcategories and brands) as a JSON file, or restore a previously exported
+            file. Imports are idempotent: re-importing the same file adds nothing.
+          </p>
+        </div>
+
+        <div class="data-actions">
+          <input
+            ref="importFileRef"
+            type="file"
+            accept="application/json,.json"
+            class="file-input-hidden"
+            :disabled="importing"
+            @change="handleImportFile"
+          />
+          <MdButton variant="filled" :disabled="exporting" @click="handleExport">
+            {{ exporting ? 'Exporting…' : 'Export wardrobe' }}
+          </MdButton>
+          <MdButton variant="outlined" :disabled="importing" @click="openImportPicker">
+            {{ importing ? 'Importing…' : 'Import wardrobe file' }}
+          </MdButton>
+        </div>
+
+        <div v-if="importResult" class="import-result" role="status">
+          Last import: {{ importResult }}
+        </div>
+      </section>
+
+      <!-- Section 5: Reference Data management -->
+      <section class="settings-card">
+        <div class="card-header">
+          <div class="card-title-group">
+            <h2 class="card-title">Reference Data</h2>
+          </div>
+          <p class="card-description">
+            The colors, categories, subcategories and brands your items use. Rename or
+            delete a row: renaming re-points your items to the new name, and deleting a
+            row in use clears it from your items. Shared default rows can only be deleted
+            while nothing anywhere references them.
+          </p>
+        </div>
+
+        <div v-if="!referenceReady" class="hint">Loading reference data…</div>
+        <p v-else-if="!usageAvailable" class="hint">
+          Reference data management is not available on this server.
+        </p>
+        <div v-else class="ref-groups">
+          <div class="ref-group">
+            <h3 class="ref-group-title">Colors</h3>
+            <div v-if="colorRows.length === 0" class="hint">No colors yet.</div>
+            <div v-for="row in colorRows" :key="row.key" class="ref-row">
+              <span v-if="row.hex" class="color-swatch" :style="{ background: row.hex }" aria-hidden="true"></span>
+              <span class="ref-row-label">{{ row.name }}</span>
+              <span class="ref-count">{{ row.count }} {{ row.count === 1 ? 'item' : 'items' }}</span>
+              <input
+                :value="draftFor(row.key)"
+                type="text"
+                class="ref-rename-input"
+                :placeholder="row.name"
+                :aria-label="`Rename color ${row.name}`"
+                :disabled="busyKey === row.key"
+                @input="setDraft(row.key, ($event.target as HTMLInputElement).value)"
+              />
+              <button
+                type="button"
+                class="ref-action-btn"
+                :disabled="!canRename(row) || busyKey === row.key"
+                @click="renameColorRow(row)"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                class="ref-action-btn danger"
+                :disabled="busyKey === row.key"
+                @click="deleteColorRow(row)"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div class="ref-group">
+            <h3 class="ref-group-title">Categories</h3>
+            <div v-if="categoryRows.length === 0" class="hint">No categories yet.</div>
+            <div v-for="row in categoryRows" :key="row.key" class="ref-row">
+              <span class="ref-row-label">{{ row.name }}</span>
+              <span class="ref-count">{{ row.count }} {{ row.count === 1 ? 'item' : 'items' }}</span>
+              <input
+                :value="draftFor(row.key)"
+                type="text"
+                class="ref-rename-input"
+                :placeholder="row.name"
+                :aria-label="`Rename category ${row.name}`"
+                :disabled="busyKey === row.key"
+                @input="setDraft(row.key, ($event.target as HTMLInputElement).value)"
+              />
+              <button
+                type="button"
+                class="ref-action-btn"
+                :disabled="!canRename(row) || busyKey === row.key"
+                @click="renameCategoryRow(row)"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                class="ref-action-btn danger"
+                :disabled="busyKey === row.key"
+                @click="deleteCategoryRow(row)"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div class="ref-group">
+            <h3 class="ref-group-title">Subcategories</h3>
+            <div v-if="subcategoryRows.length === 0" class="hint">No subcategories yet.</div>
+            <div v-for="row in subcategoryRows" :key="row.key" class="ref-row">
+              <span class="ref-row-label">{{ row.name }}<span v-if="row.sub"> · {{ row.sub }}</span></span>
+              <span class="ref-count">{{ row.count }} {{ row.count === 1 ? 'item' : 'items' }}</span>
+              <input
+                :value="draftFor(row.key)"
+                type="text"
+                class="ref-rename-input"
+                :placeholder="row.name"
+                :aria-label="`Rename subcategory ${row.name}`"
+                :disabled="busyKey === row.key"
+                @input="setDraft(row.key, ($event.target as HTMLInputElement).value)"
+              />
+              <button
+                type="button"
+                class="ref-action-btn"
+                :disabled="!canRename(row) || busyKey === row.key"
+                @click="renameSubcategoryRow(row)"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                class="ref-action-btn danger"
+                :disabled="busyKey === row.key"
+                @click="deleteSubcategoryRow(row)"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div class="ref-group">
+            <h3 class="ref-group-title">Brands</h3>
+            <div v-if="brandRows.length === 0" class="hint">No brands yet.</div>
+            <div v-for="row in brandRows" :key="row.key" class="ref-row">
+              <span class="ref-row-label">{{ row.name }}</span>
+              <span class="ref-count">{{ row.count }} {{ row.count === 1 ? 'item' : 'items' }}</span>
+              <input
+                :value="draftFor(row.key)"
+                type="text"
+                class="ref-rename-input"
+                :placeholder="row.name"
+                :aria-label="`Rename brand ${row.name}`"
+                :disabled="busyKey === row.key"
+                @input="setDraft(row.key, ($event.target as HTMLInputElement).value)"
+              />
+              <button
+                type="button"
+                class="ref-action-btn"
+                :disabled="!canRename(row) || busyKey === row.key"
+                @click="renameBrandRow(row)"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                class="ref-action-btn danger"
+                :disabled="busyKey === row.key"
+                @click="deleteBrandRow(row)"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <Toast v-model:show="showToast" :message="toastMessage" />
@@ -409,8 +602,9 @@ import { ref, computed, onMounted } from 'vue';
 import { api, imageUrl } from '../api/client';
 import { sanitizeText, validateImageFile } from '../lib/sanitize';
 import { classifyError } from '../lib/errors';
+import { useWardrobe } from '../lib/wardrobe';
 import { MdButton, ErrorDisplay, Toast } from '../ui';
-import type { TryOnProvider, UserSettings } from '../api/types';
+import type { ExportDocument, ReferenceUsage, TryOnProvider, UserSettings } from '../api/types';
 
 const loading = ref(true);
 const fetchError = ref<string | null>(null);
@@ -682,7 +876,314 @@ function copyDiscordCommand() {
   }, 2000);
 }
 
-onMounted(loadSettings);
+// ---------------------------------------------------------------------------
+// Your Data: JSON export / import
+// ---------------------------------------------------------------------------
+const exporting = ref(false);
+const importing = ref(false);
+const importResult = ref<string | null>(null);
+const importFileRef = ref<HTMLInputElement | null>(null);
+
+function openImportPicker() {
+  if (importing.value) return;
+  importFileRef.value?.click();
+}
+
+async function handleExport() {
+  exporting.value = true;
+  actionError.value = null;
+  try {
+    const blob = await api.exportData();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'cloth-web-export.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    notify('Wardrobe exported as JSON.');
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    exporting.value = false;
+  }
+}
+
+async function handleImportFile(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  target.value = '';
+  if (!file) return;
+
+  importing.value = true;
+  actionError.value = null;
+  importResult.value = null;
+  try {
+    const doc = JSON.parse(await file.text()) as ExportDocument;
+    const res = await api.importData(doc);
+    importResult.value = [
+      `${res.items_imported} item${res.items_imported === 1 ? '' : 's'}`,
+      `${res.outfits_imported} outfit${res.outfits_imported === 1 ? '' : 's'}`,
+      `${res.colors_created} color${res.colors_created === 1 ? '' : 's'}`,
+      `${res.categories_created} categor${res.categories_created === 1 ? 'y' : 'ies'}`,
+      `${res.subcategories_created} subcategor${res.subcategories_created === 1 ? 'y' : 'ies'}`,
+      `${res.brands_created} brand${res.brands_created === 1 ? '' : 's'}`,
+    ].join(', ');
+    notify('Import finished.');
+    await wardrobe.refresh();
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    importing.value = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reference Data management
+// ---------------------------------------------------------------------------
+const wardrobe = useWardrobe();
+const usage = ref<ReferenceUsage | null>(null);
+const usageAvailable = ref(false);
+const referenceReady = ref(false);
+const busyKey = ref<string | null>(null);
+/** Rename drafts keyed by row key, kept separate from the reactive rows so a
+ * re-render of the lists never wipes what the user is typing. */
+const renameDrafts = ref<Record<string, string>>({});
+
+interface RefRow {
+  key: string;
+  name: string;
+  hex?: string | null;
+  sub?: string;
+  count: number;
+}
+
+const categoryNameById = computed<Map<number, string>>(() =>
+  new Map(wardrobe.categories.value.map(c => [c.id, c.name])),
+);
+
+function rowCount(table: keyof ReferenceUsage, name: string): number {
+  return usage.value?.[table]?.[name] ?? 0;
+}
+
+const colorRows = computed<RefRow[]>(() =>
+  wardrobe.colors.value.map(c => ({
+    key: c.id,
+    name: c.id,
+    hex: c.hex_value,
+    count: rowCount('colors', c.id),
+  })),
+);
+const categoryRows = computed<RefRow[]>(() =>
+  wardrobe.categories.value.map(c => ({
+    key: String(c.id),
+    name: c.name,
+    count: rowCount('categories', c.name),
+  })),
+);
+const subcategoryRows = computed<RefRow[]>(() =>
+  wardrobe.subcategories.value.map(s => ({
+    key: String(s.id),
+    name: s.name,
+    sub: categoryNameById.value.get(s.category_id),
+    count: rowCount('subcategories', s.name),
+  })),
+);
+const brandRows = computed<RefRow[]>(() =>
+  wardrobe.brands.value.map(b => ({
+    key: b.id,
+    name: b.name,
+    count: rowCount('brands', b.name),
+  })),
+);
+
+function draftFor(key: string): string {
+  return renameDrafts.value[key] ?? '';
+}
+function setDraft(key: string, value: string) {
+  renameDrafts.value = { ...renameDrafts.value, [key]: value };
+}
+function clearDraft(key: string) {
+  const next = { ...renameDrafts.value };
+  delete next[key];
+  renameDrafts.value = next;
+}
+function canRename(row: RefRow): boolean {
+  const draft = draftFor(row.key).trim();
+  if (!draft) return false;
+  // Colors are slug-identities: the new name must differ (case-insensitive).
+  return draft.toLowerCase() !== row.name.toLowerCase();
+}
+
+async function reloadUsage() {
+  if (!usageAvailable.value) return;
+  try {
+    usage.value = await api.referenceUsage();
+  } catch {
+    // Counts are a display nicety; a failed refresh keeps the last values.
+  }
+}
+
+async function renameColorRow(row: RefRow) {
+  const newId = draftFor(row.key).trim().toLowerCase();
+  if (!canRename(row)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.renameColor(row.key, { id: newId });
+    wardrobe.renameColor(row.key, newId);
+    clearDraft(row.key);
+    await reloadUsage();
+    notify(`Color renamed to ${newId}.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function deleteColorRow(row: RefRow) {
+  const suffix = row.count > 0 ? ` ${row.count} of your items use it and will lose their color.` : '';
+  if (!confirm(`Delete color "${row.name}"?${suffix}`)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.deleteColor(row.key);
+    wardrobe.removeColor(row.key);
+    await reloadUsage();
+    notify(`Color "${row.name}" deleted.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function renameCategoryRow(row: RefRow) {
+  const newName = draftFor(row.key).trim();
+  if (!canRename(row)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.renameCategory(Number(row.key), { name: newName });
+    wardrobe.renameCategory(Number(row.key), newName);
+    clearDraft(row.key);
+    await reloadUsage();
+    notify(`Category renamed to ${newName}.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function deleteCategoryRow(row: RefRow) {
+  const suffix = row.count > 0 ? ` ${row.count} of your items use it and will be cleared.` : '';
+  if (!confirm(`Delete category "${row.name}"?${suffix}`)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.deleteCategory(Number(row.key));
+    wardrobe.removeCategory(Number(row.key));
+    await reloadUsage();
+    notify(`Category "${row.name}" deleted.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function renameSubcategoryRow(row: RefRow) {
+  const newName = draftFor(row.key).trim();
+  if (!canRename(row)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.renameSubcategory(Number(row.key), { name: newName });
+    wardrobe.renameSubcategory(Number(row.key), newName);
+    clearDraft(row.key);
+    await reloadUsage();
+    notify(`Subcategory renamed to ${newName}.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function deleteSubcategoryRow(row: RefRow) {
+  const suffix = row.count > 0 ? ` ${row.count} of your items use it and will be cleared.` : '';
+  if (!confirm(`Delete subcategory "${row.name}"?${suffix}`)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.deleteSubcategory(Number(row.key));
+    wardrobe.removeSubcategory(Number(row.key));
+    await reloadUsage();
+    notify(`Subcategory "${row.name}" deleted.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function renameBrandRow(row: RefRow) {
+  const newName = draftFor(row.key).trim();
+  if (!canRename(row)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.renameBrand(row.key, { name: newName });
+    wardrobe.renameBrand(row.key, newName);
+    clearDraft(row.key);
+    await reloadUsage();
+    notify(`Brand renamed to ${newName}.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function deleteBrandRow(row: RefRow) {
+  const suffix = row.count > 0 ? ` ${row.count} of your items use it and will be cleared.` : '';
+  if (!confirm(`Delete brand "${row.name}"?${suffix}`)) return;
+  busyKey.value = row.key;
+  actionError.value = null;
+  try {
+    await api.deleteBrand(row.key);
+    wardrobe.removeBrand(row.key);
+    await reloadUsage();
+    notify(`Brand "${row.name}" deleted.`);
+  } catch (err) {
+    actionError.value = classifyError(err).message;
+  } finally {
+    busyKey.value = null;
+  }
+}
+
+async function loadReferenceData() {
+  referenceReady.value = false;
+  try {
+    usage.value = await api.referenceUsage();
+    usageAvailable.value = true;
+  } catch {
+    // Older server (no /reference-usage) or the e2e stub: hide the manager
+    // instead of failing the whole settings page.
+    usageAvailable.value = false;
+  } finally {
+    referenceReady.value = true;
+  }
+  await wardrobe.load();
+}
+
+onMounted(() => {
+  void loadSettings();
+  void loadReferenceData();
+});
 </script>
 
 <style scoped>
@@ -1242,6 +1743,126 @@ onMounted(loadSettings);
   margin: 0.75rem 0 0;
   font-size: 0.85rem;
   color: var(--md-on-surface-variant);
+}
+
+.hint {
+  color: var(--md-on-surface-variant);
+  font-size: 0.875rem;
+  font-style: italic;
+  margin: 0;
+}
+
+.data-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.import-result {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  background: #e8f5e9;
+  border: 1px solid #c8e6c9;
+  border-radius: var(--md-shape-small, 8px);
+  color: #2e7d32;
+  font-size: 0.875rem;
+}
+
+.ref-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.ref-group-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--md-on-surface);
+  margin: 0 0 0.5rem;
+}
+
+.ref-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--md-outline-variant, #f0f0f0);
+}
+
+.ref-row:last-child {
+  border-bottom: none;
+}
+
+.color-swatch {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.ref-row-label {
+  font-size: 0.9rem;
+  color: var(--md-on-surface);
+  min-width: 8rem;
+}
+
+.ref-count {
+  font-size: 0.75rem;
+  color: var(--md-on-surface-variant);
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.ref-rename-input {
+  flex: 1;
+  min-width: 140px;
+  height: 34px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--md-outline, #79747e);
+  border-radius: var(--md-shape-small, 8px);
+  font-size: 0.85rem;
+  background: var(--md-surface, #fff);
+  color: var(--md-on-surface);
+  outline: none;
+}
+
+.ref-rename-input:focus {
+  border-color: var(--md-primary, #6750a4);
+  box-shadow: 0 0 0 1px var(--md-primary, #6750a4);
+}
+
+.ref-action-btn {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--md-primary, #6750a4);
+  background: none;
+  border: 1px solid var(--md-outline-variant, #c3d3f5);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+.ref-action-btn:hover:not(:disabled) {
+  background: var(--md-primary-container, #f3edf7);
+}
+
+.ref-action-btn.danger {
+  color: #c0392b;
+  border-color: #e0b4ae;
+}
+
+.ref-action-btn.danger:hover:not(:disabled) {
+  background: #fdecea;
+}
+
+.ref-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>
 

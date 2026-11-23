@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use sqlx::{Error as SqlxError, FromRow, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,6 +57,37 @@ pub async fn list_tables(
 /// locked out of the link flow).
 pub fn is_generic_crud_table_blocked(table: &str) -> bool {
     matches!(table, "user-settings" | "discord-link-attempts")
+}
+
+/// Tables whose writes must go through their dedicated endpoints instead of
+/// the generic CRUD layer:
+/// - `outfits`: create/update/delete must run transactionally so the
+///   linked garments' `wear_count` stays in sync;
+/// - `colors`, `clothing-categories`, `clothing-subcategories`, `brands`:
+///   the dedicated endpoints carry the slug/category validation, the
+///   shared-or-owned scoping, and the FK re-pointing the generic layer does
+///   not have.
+pub fn is_dedicated_write_table(table: &str) -> bool {
+    matches!(
+        table,
+        "outfits" | "colors" | "clothing-categories" | "clothing-subcategories" | "brands"
+    )
+}
+
+/// The dedicated endpoint that owns this table's writes, for the error message.
+fn dedicated_write_hint(table: &str) -> String {
+    match table {
+        "outfits" => "the /outfits endpoints".into(),
+        "colors" => "POST /colors and PATCH/DELETE /colors/:id".into(),
+        "clothing-categories" => {
+            "POST /clothing-categories and PATCH/DELETE /clothing-categories/:id".into()
+        }
+        "clothing-subcategories" => {
+            "POST /clothing-subcategories and PATCH/DELETE /clothing-subcategories/:id".into()
+        }
+        "brands" => "POST /brands and PATCH/DELETE /brands/:id".into(),
+        _ => "the reference-data endpoints".into(),
+    }
 }
 
 // The questions the CRUD surface used to ask Postgres per request - does this table exist,
@@ -224,6 +255,15 @@ pub async fn insert_table_row(
         None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
         Some(facts) => facts,
     };
+    if is_dedicated_write_table(&table) {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            format!(
+                "writes to {table} must go through {}",
+                dedicated_write_hint(&table)
+            ),
+        ));
+    }
     if !found.has_user_id {
         return Err((
             StatusCode::FORBIDDEN,
@@ -269,11 +309,16 @@ pub async fn delete_table_row(
         ));
     }
 
-    // Outfit deletion must go through DELETE /outfits/:id so wear counts stay in sync.
-    if table == "outfits" {
+    // Outfit deletion must go through DELETE /outfits/:id so wear counts stay
+    // in sync; reference tables through their dedicated endpoints (see
+    // is_dedicated_write_table).
+    if is_dedicated_write_table(&table) {
         return Err((
             StatusCode::METHOD_NOT_ALLOWED,
-            "use DELETE /outfits/:id to delete outfits".into(),
+            format!(
+                "writes to {table} must go through {}",
+                dedicated_write_hint(&table)
+            ),
         ));
     }
     // Existence and ownership come from the startup snapshot, and the statement was
@@ -335,6 +380,15 @@ pub async fn update_table_row(
         None => return Err((StatusCode::NOT_FOUND, "table not found".into())),
         Some(facts) => facts,
     };
+    if is_dedicated_write_table(&table) {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            format!(
+                "writes to {table} must go through {}",
+                dedicated_write_hint(&table)
+            ),
+        ));
+    }
     if !found.has_user_id {
         return Err((
             StatusCode::FORBIDDEN,
@@ -430,7 +484,7 @@ pub struct CreateColorRequest {
 
 pub async fn create_color(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<CreateColorRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, String)> {
     let id = req.id.trim().to_lowercase();
@@ -454,12 +508,13 @@ pub async fn create_color(
     };
 
     let row: (JsonValue,) = sqlx::query_as(
-        "INSERT INTO colors (id, hex_value) VALUES ($1, $2) \
-         ON CONFLICT (id) DO UPDATE SET id = colors.id \
+        "INSERT INTO colors (id, hex_value, user_id) VALUES ($1, $2, $3) \
+         ON CONFLICT (user_id, id) DO UPDATE SET hex_value = colors.hex_value \
          RETURNING to_jsonb(colors) AS row",
     )
     .bind(&id)
     .bind(&hex_value)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
@@ -479,7 +534,7 @@ pub struct CreateCategoryRequest {
 
 pub async fn create_category(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<CreateCategoryRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, String)> {
     let name = req.name.trim();
@@ -487,11 +542,16 @@ pub async fn create_category(
         return Err((StatusCode::BAD_REQUEST, "name is required".into()));
     }
 
+    // Categories are shared-or-owned: one row per (user, name), so a re-type
+    // in the item form returns the caller's existing row instead of adding a
+    // duplicate.
     let row: (JsonValue,) = sqlx::query_as(
-        r#"INSERT INTO "clothing-categories" (name) VALUES ($1)
+        r#"INSERT INTO "clothing-categories" (name, user_id) VALUES ($1, $2)
+           ON CONFLICT (user_id, name) DO UPDATE SET name = "clothing-categories".name
            RETURNING to_jsonb("clothing-categories") AS row"#,
     )
     .bind(name)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
@@ -512,7 +572,7 @@ pub struct CreateSubcategoryRequest {
 
 pub async fn create_subcategory(
     State(state): State<Arc<AppState>>,
-    _auth: AuthUser,
+    AuthUser(user_id): AuthUser,
     Json(req): Json<CreateSubcategoryRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, String)> {
     let name = req.name.trim();
@@ -520,12 +580,33 @@ pub async fn create_subcategory(
         return Err((StatusCode::BAD_REQUEST, "name is required".into()));
     }
 
+    // The parent category must be one the caller can see (owned or shared):
+    // a subcategory pointing at another user's category would attach the
+    // new row to reference data the caller never saw in their form.
+    let parent: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT id FROM "clothing-categories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+    )
+    .bind(req.category_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not check category: {e}"),
+        )
+    })?;
+    if parent.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "category not found".to_string()));
+    }
+
     let row: (JsonValue,) = sqlx::query_as(
-        r#"INSERT INTO "clothing-subcategories" (name, category_id) VALUES ($1, $2)
+        r#"INSERT INTO "clothing-subcategories" (name, category_id, user_id) VALUES ($1, $2, $3)
            RETURNING to_jsonb("clothing-subcategories") AS row"#,
     )
     .bind(name)
     .bind(req.category_id)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
@@ -536,6 +617,1695 @@ pub async fn create_subcategory(
     })?;
 
     Ok(Json(row.0))
+}
+
+// ---------------------------------------------------------------------------
+// Reference-data management: rename and delete for colors, categories,
+// subcategories and brands. The generic CRUD layer refuses writes on these
+// tables (is_dedicated_write_table), so these endpoints are the only write
+// path and carry the scoping and FK re-pointing the data model needs.
+//
+// A row is *manageable* by the caller when it is owned (`user_id = caller`)
+// or a legacy shared row (`user_id IS NULL`). Owned rows re-point only the
+// caller's items; shared rows are re-pointed globally on rename, and can be
+// deleted only when nothing anywhere still references them.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RenameColorRequest {
+    pub id: String,
+}
+
+pub async fn rename_color(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(old_id): Path<String>,
+    Json(req): Json<RenameColorRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let new_id = req.id.trim().to_lowercase();
+    if new_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "color id is required".into()));
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT user_id FROM colors WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+    )
+    .bind(&old_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "color not found".into()));
+    };
+    let shared = owner.is_none();
+
+    // The (user_id, id) primary key forbids the target slug for this owner.
+    let taken: (i64,) = if shared {
+        sqlx::query_as("SELECT count(*) FROM colors WHERE id = $1 AND user_id IS NULL")
+            .bind(&new_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as("SELECT count(*) FROM colors WHERE id = $1 AND user_id = $2")
+            .bind(&new_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if taken.0 > 0 && new_id != old_id {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("color '{new_id}' already exists"),
+        ));
+    }
+
+    sqlx::query("UPDATE colors SET id = $1 WHERE id = $2 AND user_id IS NOT DISTINCT FROM $3")
+        .bind(&new_id)
+        .bind(&old_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("could not rename color: {e}"),
+            )
+        })?;
+
+    // Items that referenced the old slug follow it: the caller's own items for
+    // an owned row, every user's items for a shared row (the row is global).
+    if new_id != old_id {
+        if shared {
+            sqlx::query("UPDATE \"clothing-items\" SET color_id = $1 WHERE color_id = $2")
+                .bind(&new_id)
+                .bind(&old_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("could not re-point items: {e}"),
+                    )
+                })?;
+        } else {
+            sqlx::query(
+                "UPDATE \"clothing-items\" SET color_id = $1 WHERE color_id = $2 AND user_id = $3",
+            )
+            .bind(&new_id)
+            .bind(&old_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not re-point items: {e}"),
+                )
+            })?;
+        }
+    }
+
+    let row: (JsonValue,) = sqlx::query_as(
+        "SELECT to_jsonb(colors) AS row FROM colors WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(&new_id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the color: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(row.0))
+}
+
+pub async fn delete_color(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(color_id): Path<String>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT user_id FROM colors WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+    )
+    .bind(&color_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "color not found".into()));
+    };
+    let shared = owner.is_none();
+
+    // Items referencing the color: the caller's for an owned row, everyone's
+    // for a shared row. A shared row in use anywhere cannot be deleted; an
+    // owned row loses its references (the color column goes NULL).
+    let refs: (i64,) = if shared {
+        sqlx::query_as("SELECT count(*) FROM \"clothing-items\" WHERE color_id = $1")
+            .bind(&color_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as(
+            "SELECT count(*) FROM \"clothing-items\" WHERE color_id = $1 AND user_id = $2",
+        )
+        .bind(&color_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if shared && refs.0 > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("color is used by {} item(s)", refs.0),
+        ));
+    }
+
+    if !shared {
+        sqlx::query(
+            "UPDATE \"clothing-items\" SET color_id = NULL WHERE color_id = $1 AND user_id = $2",
+        )
+        .bind(&color_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not clear item colors: {e}"),
+            )
+        })?;
+    }
+
+    let row: Option<(i32,)> = sqlx::query_as(
+        "DELETE FROM colors WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2 RETURNING 1",
+    )
+    .bind(&color_id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match row {
+        Some(_) => Ok(Json(
+            serde_json::json!({ "deleted": true, "items_affected": refs.0 }),
+        )),
+        None => Err((StatusCode::NOT_FOUND, "color not found".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RenameCategoryRequest {
+    pub name: String,
+}
+
+pub async fn rename_category(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(category_id): Path<String>,
+    Json(req): Json<RenameCategoryRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+    // An integer id that does not parse cannot name a category row.
+    let id: i64 = category_id
+        .parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "category not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"SELECT user_id FROM "clothing-categories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "category not found".into()));
+    };
+    let shared = owner.is_none();
+
+    // The (user_id, name) uniqueness constraint forbids a second row with the
+    // same name for this owner.
+    let taken: (i64,) = if shared {
+        sqlx::query_as(r#"SELECT count(*) FROM "clothing-categories" WHERE name = $1 AND id <> $2 AND user_id IS NULL"#)
+            .bind(name)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as(r#"SELECT count(*) FROM "clothing-categories" WHERE name = $1 AND id <> $2 AND user_id = $3"#)
+            .bind(name)
+            .bind(id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if taken.0 > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("a category named '{name}' already exists"),
+        ));
+    }
+
+    sqlx::query(r#"UPDATE "clothing-categories" SET name = $1 WHERE id = $2 AND user_id IS NOT DISTINCT FROM $3"#)
+        .bind(name)
+        .bind(id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not rename category: {e}")))?;
+
+    let row: (JsonValue,) = sqlx::query_as(
+        r#"SELECT to_jsonb("clothing-categories") AS row FROM "clothing-categories" WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2"#,
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the category: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(row.0))
+}
+
+pub async fn delete_category(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(category_id): Path<String>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let id: i64 = category_id
+        .parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "category not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"SELECT user_id FROM "clothing-categories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "category not found".into()));
+    };
+    let shared = owner.is_none();
+
+    // Subcategories underneath: any remaining row would lose its FK target,
+    // so the caller's own subcategories go with the category and anything
+    // else (including shared subcategories) blocks the delete.
+    let mut deleted_subs: Vec<i32> = vec![];
+    let subs_left: (i64,) =
+        sqlx::query_as(r#"SELECT count(*) FROM "clothing-subcategories" WHERE category_id = $1"#)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if subs_left.0 > 0 {
+        if shared {
+            return Err((
+                StatusCode::CONFLICT,
+                "category has subcategories; delete those first".to_string(),
+            ));
+        }
+        let owned_subs: Vec<(i32,)> = sqlx::query_as(
+            r#"SELECT id FROM "clothing-subcategories" WHERE category_id = $1 AND user_id = $2"#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        deleted_subs = owned_subs.into_iter().map(|(s,)| s).collect();
+    }
+
+    // Items in the category (and the subcategories being deleted): the
+    // caller's for an owned row, everyone's for a shared row, which may not
+    // reference any. Their references are cleared before the subcategory
+    // rows go, or the FK from "clothing-items" forbids the delete.
+    let refs: (i64,) = if shared {
+        sqlx::query_as(r#"SELECT count(*) FROM "clothing-items" WHERE category_id = $1"#)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as(
+            r#"SELECT count(*) FROM "clothing-items" WHERE category_id = $1 AND user_id = $2"#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if shared && refs.0 > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("category is used by {} item(s)", refs.0),
+        ));
+    }
+    if !shared {
+        sqlx::query(
+            r#"UPDATE "clothing-items" SET category_id = NULL, subcategory_id = NULL
+               WHERE user_id = $1 AND (category_id = $2 OR subcategory_id = ANY($3::int[]))"#,
+        )
+        .bind(user_id)
+        .bind(id)
+        .bind(&deleted_subs)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not clear item categories: {e}"),
+            )
+        })?;
+    }
+
+    // The subcategory rows can go once nothing points at them anymore.
+    if !deleted_subs.is_empty() {
+        sqlx::query(
+            r#"DELETE FROM "clothing-subcategories" WHERE category_id = $1 AND user_id = $2"#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not delete subcategories: {e}"),
+            )
+        })?;
+        let still_left: (i64,) = sqlx::query_as(
+            r#"SELECT count(*) FROM "clothing-subcategories" WHERE category_id = $1"#,
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if still_left.0 > 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                "category has subcategories that are not yours; delete those first".to_string(),
+            ));
+        }
+    }
+
+    let row: Option<(i32,)> = sqlx::query_as(
+        r#"DELETE FROM "clothing-categories" WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2 RETURNING 1"#,
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match row {
+        Some(_) => Ok(Json(serde_json::json!({
+            "deleted": true,
+            "items_affected": refs.0,
+            "subcategories_deleted": deleted_subs.len(),
+        }))),
+        None => Err((StatusCode::NOT_FOUND, "category not found".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RenameSubcategoryRequest {
+    pub name: String,
+    /// Move the subcategory to another of the caller's (or shared) categories.
+    pub category_id: Option<i64>,
+}
+
+pub async fn rename_subcategory(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(subcategory_id): Path<String>,
+    Json(req): Json<RenameSubcategoryRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+    let id: i64 = subcategory_id
+        .parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "subcategory not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"SELECT user_id FROM "clothing-subcategories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "subcategory not found".into()));
+    };
+
+    // A move must land on a category the caller can see (owned or shared).
+    if let Some(target) = req.category_id {
+        let parent: Option<(i32,)> = sqlx::query_as(
+            r#"SELECT id FROM "clothing-categories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+        )
+        .bind(target)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if parent.is_none() {
+            return Err((StatusCode::BAD_REQUEST, "category not found".to_string()));
+        }
+    }
+
+    sqlx::query(
+        r#"UPDATE "clothing-subcategories"
+           SET name = $1, category_id = COALESCE($2, category_id)
+           WHERE id = $3 AND user_id IS NOT DISTINCT FROM $4"#,
+    )
+    .bind(name)
+    .bind(req.category_id)
+    .bind(id)
+    .bind(owner)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not rename subcategory: {e}"),
+        )
+    })?;
+
+    let row: (JsonValue,) = sqlx::query_as(
+        r#"SELECT to_jsonb("clothing-subcategories") AS row FROM "clothing-subcategories" WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2"#,
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the subcategory: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(row.0))
+}
+
+pub async fn delete_subcategory(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(subcategory_id): Path<String>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let id: i64 = subcategory_id
+        .parse()
+        .map_err(|_| (StatusCode::NOT_FOUND, "subcategory not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        r#"SELECT user_id FROM "clothing-subcategories" WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)"#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "subcategory not found".into()));
+    };
+    let shared = owner.is_none();
+
+    let refs: (i64,) = if shared {
+        sqlx::query_as(r#"SELECT count(*) FROM "clothing-items" WHERE subcategory_id = $1"#)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as(
+            r#"SELECT count(*) FROM "clothing-items" WHERE subcategory_id = $1 AND user_id = $2"#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if shared && refs.0 > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("subcategory is used by {} item(s)", refs.0),
+        ));
+    }
+    if !shared {
+        sqlx::query(r#"UPDATE "clothing-items" SET subcategory_id = NULL WHERE subcategory_id = $1 AND user_id = $2"#)
+            .bind(id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not clear item subcategories: {e}")))?;
+    }
+
+    let row: Option<(i32,)> = sqlx::query_as(
+        r#"DELETE FROM "clothing-subcategories" WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2 RETURNING 1"#,
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match row {
+        Some(_) => Ok(Json(
+            serde_json::json!({ "deleted": true, "items_affected": refs.0 }),
+        )),
+        None => Err((StatusCode::NOT_FOUND, "subcategory not found".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateBrandRequest {
+    pub name: String,
+}
+
+/// Brands are shared-or-owned like the other reference tables. There is no
+/// unique constraint on (user_id, name), so duplicates are prevented by
+/// returning the caller's existing row of the same name instead of inserting.
+pub async fn create_brand(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Json(req): Json<CreateBrandRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+
+    let existing: Option<(JsonValue,)> = sqlx::query_as(
+        "SELECT to_jsonb(b) FROM brands b \
+         WHERE lower(b.name) = lower($1) AND (b.user_id = $2 OR b.user_id IS NULL) \
+         ORDER BY (b.user_id IS NULL) ASC, b.id LIMIT 1",
+    )
+    .bind(name)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_read_error)?;
+    if let Some((row,)) = existing {
+        return Ok(Json(row));
+    }
+
+    let row: (JsonValue,) = sqlx::query_as(
+        "INSERT INTO brands (name, user_id) VALUES ($1, $2) RETURNING to_jsonb(brands) AS row",
+    )
+    .bind(name)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not create brand: {e}"),
+        )
+    })?;
+
+    Ok(Json(row.0))
+}
+
+#[derive(Deserialize)]
+pub struct RenameBrandRequest {
+    pub name: String,
+}
+
+pub async fn rename_brand(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(brand_id): Path<String>,
+    Json(req): Json<RenameBrandRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+    let id = Uuid::parse_str(&brand_id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "brand not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT user_id FROM brands WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "brand not found".into()));
+    };
+
+    sqlx::query("UPDATE brands SET name = $1 WHERE id = $2 AND user_id IS NOT DISTINCT FROM $3")
+        .bind(name)
+        .bind(id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("could not rename brand: {e}"),
+            )
+        })?;
+
+    let row: (JsonValue,) = sqlx::query_as(
+        "SELECT to_jsonb(brands) AS row FROM brands WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read back the brand: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(row.0))
+}
+
+pub async fn delete_brand(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(brand_id): Path<String>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let id = Uuid::parse_str(&brand_id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "brand not found".into()))?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let owner: Option<(Option<Uuid>,)> = sqlx::query_as(
+        "SELECT user_id FROM brands WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((owner,)) = owner else {
+        return Err((StatusCode::NOT_FOUND, "brand not found".into()));
+    };
+    let shared = owner.is_none();
+
+    let refs: (i64,) = if shared {
+        sqlx::query_as("SELECT count(*) FROM \"clothing-items\" WHERE brand_id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        sqlx::query_as(
+            "SELECT count(*) FROM \"clothing-items\" WHERE brand_id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if shared && refs.0 > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("brand is used by {} item(s)", refs.0),
+        ));
+    }
+    if !shared {
+        sqlx::query(
+            "UPDATE \"clothing-items\" SET brand_id = NULL WHERE brand_id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not clear item brands: {e}"),
+            )
+        })?;
+    }
+
+    let row: Option<(i32,)> = sqlx::query_as(
+        "DELETE FROM brands WHERE id = $1 AND user_id IS NOT DISTINCT FROM $2 RETURNING 1",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match row {
+        Some(_) => Ok(Json(
+            serde_json::json!({ "deleted": true, "items_affected": refs.0 }),
+        )),
+        None => Err((StatusCode::NOT_FOUND, "brand not found".into())),
+    }
+}
+
+/// How many of the caller's wardrobe items reference each visible reference
+/// row, for the management UI: it drives the delete confirmations ("3 items
+/// lose their color") and the shared-row delete gate.
+pub async fn reference_usage(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let colors: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT c.id, count(ci.id) FROM colors c \
+         LEFT JOIN \"clothing-items\" ci ON ci.color_id = c.id \
+         WHERE (c.user_id IS NULL OR c.user_id = $1) GROUP BY c.id",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?;
+    // Name-keyed (not id-keyed): the settings UI lists rows by name and the
+    // rename/delete forms are driven from that same list.
+    let categories: Vec<(String, i64)> = sqlx::query_as(
+        r#"SELECT cc.name, count(ci.id) FROM "clothing-categories" cc
+           LEFT JOIN "clothing-items" ci ON ci.category_id = cc.id
+           WHERE (cc.user_id IS NULL OR cc.user_id = $1) GROUP BY cc.name"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?;
+    let subcategories: Vec<(String, i64)> = sqlx::query_as(
+        r#"SELECT cs.name, count(ci.id) FROM "clothing-subcategories" cs
+           LEFT JOIN "clothing-items" ci ON ci.subcategory_id = cs.id
+           WHERE (cs.user_id IS NULL OR cs.user_id = $1) GROUP BY cs.name"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?;
+    let brands: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT b.name, count(ci.id) FROM brands b \
+         LEFT JOIN \"clothing-items\" ci ON ci.brand_id = b.id \
+         WHERE (b.user_id IS NULL OR b.user_id = $1) GROUP BY b.name",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?;
+
+    Ok(Json(serde_json::json!({
+        "colors": colors.iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::HashMap<_, _>>(),
+        "categories": categories.iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::HashMap<_, _>>(),
+        "subcategories": subcategories.iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::HashMap<_, _>>(),
+        "brands": brands.iter().map(|(k, v)| (k.clone(), *v)).collect::<std::collections::HashMap<_, _>>(),
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Wardrobe export / import. The export is a versioned JSON document of the
+// caller's items, outfits (carrying their item ids, like the list endpoint)
+// and every reference row visible to them; the import restores it into the
+// caller's account, idempotently, which makes it the restore path for a
+// fresh project (the base-schema migration makes a fresh project possible).
+// ---------------------------------------------------------------------------
+
+/// Rows that an import may carry. Field names mirror the export document,
+/// which is built from `to_jsonb` of the real rows.
+#[derive(Deserialize)]
+pub struct ImportItem {
+    pub id: String,
+    pub name: Option<String>,
+    pub brand_id: Option<String>,
+    pub category_id: Option<i64>,
+    pub subcategory_id: Option<i64>,
+    pub color_id: Option<String>,
+    pub purchase_price: Option<f64>,
+    pub owned_since: Option<String>,
+    pub origin: Option<String>,
+    pub laundry_impact: Option<String>,
+    pub repairable: Option<bool>,
+    pub notes: Option<String>,
+    pub image_path: Option<String>,
+    pub is_active: Option<bool>,
+    pub wear_count: Option<i64>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportOutfit {
+    pub id: String,
+    pub date: Option<String>,
+    pub notes: Option<String>,
+    pub image_path: Option<String>,
+    pub is_active: Option<bool>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportColor {
+    pub id: String,
+    pub hex_value: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportCategory {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ImportSubcategory {
+    pub id: i64,
+    pub name: String,
+    pub category_id: i64,
+}
+
+#[derive(Deserialize)]
+pub struct ImportBrand {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ImportRequest {
+    #[serde(default)]
+    pub items: Vec<ImportItem>,
+    #[serde(default)]
+    pub outfits: Vec<ImportOutfit>,
+    #[serde(default)]
+    pub colors: Vec<ImportColor>,
+    #[serde(default)]
+    pub categories: Vec<ImportCategory>,
+    #[serde(default)]
+    pub subcategories: Vec<ImportSubcategory>,
+    #[serde(default)]
+    pub brands: Vec<ImportBrand>,
+}
+
+pub async fn export_wardrobe(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+) -> Result<(axum::http::HeaderMap, Json<JsonValue>), (StatusCode, String)> {
+    let items: Vec<JsonValue> = sqlx::query_as(
+        r#"SELECT to_jsonb(ci) FROM "clothing-items" ci
+           WHERE ci.user_id = $1 ORDER BY ci.created_at DESC, ci.id ASC"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?
+    .into_iter()
+    .map(|(row,)| row)
+    .collect();
+
+    // Outfits carry their item ids exactly the way the list endpoint does.
+    let outfits_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} ORDER BY o.date");
+    let outfits: Vec<JsonValue> = sqlx::query(sqlx::AssertSqlSafe(outfits_sql.as_str()))
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(db_read_error)?
+        .into_iter()
+        .map(|row| row.get::<JsonValue, _>("row"))
+        .collect();
+
+    // Reference data: everything the caller can see (owned plus shared), so
+    // the document restores fully into a fresh account.
+    let colors: Vec<JsonValue> = sqlx::query_as(
+        "SELECT to_jsonb(c) FROM colors c WHERE c.user_id IS NULL OR c.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?
+    .into_iter()
+    .map(|(row,)| row)
+    .collect();
+    let categories: Vec<JsonValue> = sqlx::query_as(
+        r#"SELECT to_jsonb(cc) FROM "clothing-categories" cc WHERE cc.user_id IS NULL OR cc.user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?
+    .into_iter()
+    .map(|(row,)| row)
+    .collect();
+    let subcategories: Vec<JsonValue> = sqlx::query_as(
+        r#"SELECT to_jsonb(cs) FROM "clothing-subcategories" cs WHERE cs.user_id IS NULL OR cs.user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?
+    .into_iter()
+    .map(|(row,)| row)
+    .collect();
+    let brands: Vec<JsonValue> = sqlx::query_as(
+        "SELECT to_jsonb(b) FROM brands b WHERE b.user_id IS NULL OR b.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_read_error)?
+    .into_iter()
+    .map(|(row,)| row)
+    .collect();
+
+    let exported_at: (String,) =
+        sqlx::query_as(r#"SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')"#)
+            .fetch_one(&state.db)
+            .await
+            .map_err(db_read_error)?;
+
+    let mut headers = axum::http::HeaderMap::new();
+    if let Ok(value) = format!("attachment; filename=\"cloth-web-export-{user_id}.json\"")
+        .parse::<axum::http::header::HeaderValue>()
+    {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+
+    Ok((
+        headers,
+        Json(serde_json::json!({
+            "version": 1,
+            "exported_at": exported_at.0,
+            "user_id": user_id.to_string(),
+            "items": items,
+            "outfits": outfits,
+            "colors": colors,
+            "categories": categories,
+            "subcategories": subcategories,
+            "brands": brands,
+        })),
+    ))
+}
+
+/// Restore an export document into the caller's account. Idempotent: rows
+/// whose ids already exist are skipped, links dedupe on their unique pair,
+/// and the wear counts of every caller item are recomputed from the outfit
+/// links at the end — the counts are derived data in this app, so this also
+/// normalises drift accumulated by historical delete/recreate cycles.
+///
+/// Images travel in the document for completeness, but an `image_path` is
+/// only kept when it already points into the caller's own storage folder
+/// (a same-account restore); otherwise the item is imported without it.
+pub async fn import_wardrobe(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Json(req): Json<ImportRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    if req.items.len() > 10_000 || req.outfits.len() > 10_000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "import is limited to 10,000 items and 10,000 outfits".to_string(),
+        ));
+    }
+
+    // Every id must be a uuid, unique within the document, and every outfit
+    // link must name an item the document carries or the caller already owns.
+    let mut item_uuids: Vec<Uuid> = vec![];
+    for raw in &req.items {
+        match Uuid::parse_str(&raw.id) {
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("item id is not a uuid: {}", raw.id),
+                ))
+            }
+            Ok(u) => {
+                if item_uuids.contains(&u) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("duplicate item id in import: {}", raw.id),
+                    ));
+                }
+                item_uuids.push(u);
+            }
+        }
+    }
+    let item_set: std::collections::HashSet<Uuid> = item_uuids.iter().copied().collect();
+
+    let mut outfit_uuids: Vec<Uuid> = vec![];
+    for raw in &req.outfits {
+        match Uuid::parse_str(&raw.id) {
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("outfit id is not a uuid: {}", raw.id),
+                ))
+            }
+            Ok(u) => {
+                if outfit_uuids.contains(&u) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("duplicate outfit id in import: {}", raw.id),
+                    ));
+                }
+                outfit_uuids.push(u);
+            }
+        }
+    }
+    for raw in &req.outfits {
+        if raw.item_ids.len() > 200 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "an outfit cannot carry more than 200 items".to_string(),
+            ));
+        }
+        for ref_id in &raw.item_ids {
+            match Uuid::parse_str(ref_id) {
+                Err(_) => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("outfit references a non-uuid item id: {ref_id}"),
+                    ))
+                }
+                Ok(u) => {
+                    if !item_set.contains(&u) {
+                        let exists: Option<(i32,)> = sqlx::query_as(
+                            "SELECT 1 FROM \"clothing-items\" WHERE id = $1 AND user_id = $2",
+                        )
+                        .bind(u)
+                        .bind(user_id)
+                        .fetch_optional(&state.db)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                        if exists.is_none() {
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                format!("outfit references unknown item: {ref_id}"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // ------------------------------------------------------------------
+    // Reference data: map each export row onto a row the caller can already
+    // see (slug for colors, name for the rest), creating a caller-owned row
+    // where nothing matches. Export ids then translate to local ids for the
+    // item inserts below.
+    // ------------------------------------------------------------------
+    let existing_colors: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM colors WHERE user_id = $1 OR user_id IS NULL")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut color_slugs: std::collections::HashSet<String> =
+        existing_colors.into_iter().map(|(s,)| s).collect();
+    let mut colors_created = 0usize;
+    for c in &req.colors {
+        let slug = c.id.trim().to_lowercase();
+        if slug.is_empty() {
+            continue;
+        }
+        if color_slugs.contains(&slug) {
+            continue;
+        }
+        let hex_value = match &c.hex_value {
+            Some(h) if !h.trim().is_empty() => {
+                let h = h.trim();
+                if h.len() != 7
+                    || !h.starts_with('#')
+                    || !h[1..].chars().all(|x| x.is_ascii_hexdigit())
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "hex_value must be in #RRGGBB format".to_string(),
+                    ));
+                }
+                Some(h.to_string())
+            }
+            _ => None,
+        };
+        sqlx::query("INSERT INTO colors (id, hex_value, user_id) VALUES ($1, $2, $3)")
+            .bind(&slug)
+            .bind(&hex_value)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("could not import color: {e}"),
+                )
+            })?;
+        color_slugs.insert(slug);
+        colors_created += 1;
+    }
+
+    let existing_cats: Vec<(i32, String)> = sqlx::query_as(
+        r#"SELECT id, name FROM "clothing-categories" WHERE user_id = $1 OR user_id IS NULL"#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut cat_by_name: HashMap<String, i32> = existing_cats
+        .into_iter()
+        .map(|(id, name)| (name.to_lowercase(), id))
+        .collect();
+    let mut cat_map: HashMap<i64, i32> = HashMap::new();
+    let mut categories_created = 0usize;
+    for c in &req.categories {
+        let name = c.name.trim().to_string();
+        if name.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "category name is required".into()));
+        }
+        let local = match cat_by_name.get(&name.to_lowercase()) {
+            Some(id) => *id,
+            None => {
+                let row: (i32,) = sqlx::query_as(
+                    r#"INSERT INTO "clothing-categories" (name, user_id) VALUES ($1, $2) RETURNING id"#,
+                )
+                .bind(&name)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not import category: {e}")))?;
+                cat_by_name.insert(name.to_lowercase(), row.0);
+                categories_created += 1;
+                row.0
+            }
+        };
+        cat_map.insert(c.id, local);
+    }
+
+    let existing_subs: Vec<(i32, String, i32)> = sqlx::query_as(
+        r#"SELECT id, name, category_id FROM "clothing-subcategories" WHERE user_id = $1 OR user_id IS NULL"#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut sub_by_key: HashMap<(i32, String), i32> = existing_subs
+        .into_iter()
+        .map(|(id, name, cat_id)| ((cat_id, name.to_lowercase()), id))
+        .collect();
+    let mut sub_map: HashMap<i64, i32> = HashMap::new();
+    let mut subcategories_created = 0usize;
+    for s in &req.subcategories {
+        let name = s.name.trim().to_string();
+        if name.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "subcategory name is required".into(),
+            ));
+        }
+        // The parent category must have been mapped above (the export's own
+        // category rows) - a document that names a subcategory without its
+        // category cannot be placed.
+        let local_cat = match cat_map.get(&s.category_id) {
+            Some(id) => *id,
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("subcategory references unknown category: {}", s.category_id),
+                ))
+            }
+        };
+        let key = (local_cat, name.to_lowercase());
+        let local = match sub_by_key.get(&key) {
+            Some(id) => *id,
+            None => {
+                let row: (i32,) = sqlx::query_as(
+                    r#"INSERT INTO "clothing-subcategories" (name, category_id, user_id) VALUES ($1, $2, $3) RETURNING id"#,
+                )
+                .bind(&name)
+                .bind(local_cat)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not import subcategory: {e}")))?;
+                sub_by_key.insert(key, row.0);
+                subcategories_created += 1;
+                row.0
+            }
+        };
+        sub_map.insert(s.id, local);
+    }
+
+    let existing_brands: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM brands WHERE user_id = $1 OR user_id IS NULL")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut brand_by_name: HashMap<String, Uuid> = existing_brands
+        .into_iter()
+        .map(|(id, name)| (name.to_lowercase(), id))
+        .collect();
+    let mut brand_map: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut brands_created = 0usize;
+    for b in &req.brands {
+        let name = b.name.trim().to_string();
+        if name.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "brand name is required".into()));
+        }
+        let id = match Uuid::parse_str(&b.id) {
+            Ok(u) => u,
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("brand id is not a uuid: {}", b.id),
+                ))
+            }
+        };
+        let local = match brand_by_name.get(&name.to_lowercase()) {
+            Some(id) => *id,
+            None => {
+                let row: (Uuid,) = sqlx::query_as(
+                    "INSERT INTO brands (id, name, user_id) VALUES ($1, $2, $3) RETURNING id",
+                )
+                .bind(id)
+                .bind(&name)
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("could not import brand: {e}"),
+                    )
+                })?;
+                brand_by_name.insert(name.to_lowercase(), row.0);
+                brands_created += 1;
+                row.0
+            }
+        };
+        brand_map.insert(id, local);
+    }
+
+    // ------------------------------------------------------------------
+    // Items: idempotency is per account. A document item whose id the caller
+    // already owns maps onto that row and is skipped (same-account restore).
+    // Anything else either maps onto an existing item with the same name
+    // (a re-import of the same document must not double the wardrobe) or
+    // gets a fresh uuid of its own (a document's ids belong to whoever
+    // exported it, so reusing them in a different account would either
+    // collide with a stranger's row or silently skip the import). The
+    // document's ids are only needed afterwards to remap the outfit links.
+    // References are translated to their local ids, and only images that
+    // already point into the caller's own folder are carried over.
+    // ------------------------------------------------------------------
+    let owned_items: Vec<(Uuid,)> = if item_set.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as(
+            "SELECT id FROM \"clothing-items\" WHERE user_id = $1 AND id = ANY($2::uuid[])",
+        )
+        .bind(user_id)
+        .bind(&item_uuids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let owned_items_set: std::collections::HashSet<Uuid> =
+        owned_items.into_iter().map(|(id,)| id).collect();
+    // Names of everything the caller already owns: the dedupe key for items
+    // that arrive without their original id. Each row satisfies at most one
+    // document item, so the map is consumed as matches are made.
+    let existing_items: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM \"clothing-items\" WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut item_by_name: HashMap<String, Uuid> = existing_items
+        .into_iter()
+        .map(|(id, name)| (name.trim().to_lowercase(), id))
+        .collect();
+    let mut item_map: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut new_items: Vec<JsonValue> = Vec::with_capacity(req.items.len());
+    for it in &req.items {
+        let doc_id = Uuid::parse_str(&it.id).unwrap(); // validated above
+        let name = match &it.name {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "every imported item needs a name".to_string(),
+                ))
+            }
+        };
+        let (local, already_owned) = if owned_items_set.contains(&doc_id) {
+            (doc_id, true)
+        } else if let Some(id) = item_by_name.remove(&name.to_lowercase()) {
+            (id, true)
+        } else {
+            (Uuid::new_v4(), false)
+        };
+        // The matched (or kept) name is claimed either way, so a second
+        // document item with the same name gets a fresh row of its own.
+        item_by_name.remove(&name.to_lowercase());
+        item_map.insert(doc_id, local);
+        if already_owned {
+            continue;
+        }
+        let brand_id = it
+            .brand_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .and_then(|u| brand_map.get(&u))
+            .map(|u| u.to_string());
+        let category_id = it.category_id.and_then(|n| cat_map.get(&n).copied());
+        let subcategory_id = it.subcategory_id.and_then(|n| sub_map.get(&n).copied());
+        let color_id = it
+            .color_id
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .filter(|s| color_slugs.contains(s));
+        let image_path = it
+            .image_path
+            .as_deref()
+            .filter(|p| !p.is_empty() && object_path_within_user(extract_object_path(p), &user_id));
+        new_items.push(json!({
+            "id": local.to_string(),
+            "name": name,
+            "brand_id": brand_id,
+            "category_id": category_id,
+            "subcategory_id": subcategory_id,
+            "color_id": color_id,
+            "purchase_price": it.purchase_price,
+            "owned_since": it.owned_since,
+            "origin": it.origin,
+            "laundry_impact": it.laundry_impact,
+            "repairable": it.repairable,
+            "notes": it.notes,
+            "image_path": image_path,
+            "is_active": it.is_active,
+            "wear_count": it.wear_count,
+            "created_at": it.created_at,
+            "updated_at": it.updated_at,
+        }));
+    }
+
+    let items_inserted: Vec<(Uuid,)> = if new_items.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as(
+            r#"WITH rows AS (
+                SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(
+                    id uuid, name text, brand_id uuid, category_id int, subcategory_id int,
+                    color_id text, purchase_price numeric, owned_since date, origin text,
+                    laundry_impact text, repairable bool, notes text, image_path text,
+                    is_active bool, wear_count int, created_at timestamptz, updated_at timestamptz)
+            )
+            INSERT INTO "clothing-items"
+                (id, user_id, name, brand_id, category_id, subcategory_id, color_id,
+                 purchase_price, owned_since, origin, laundry_impact, repairable, notes,
+                 image_path, is_active, wear_count, created_at, updated_at)
+            SELECT r.id, $2, r.name, r.brand_id, r.category_id, r.subcategory_id, r.color_id,
+                   r.purchase_price, r.owned_since, r.origin, r.laundry_impact, r.repairable,
+                   r.notes, r.image_path, COALESCE(r.is_active, true), r.wear_count,
+                   COALESCE(r.created_at, now()), COALESCE(r.updated_at, now())
+            FROM rows r
+            RETURNING id"#,
+        )
+        .bind(JsonValue::Array(new_items))
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("could not import items: {e}"),
+            )
+        })?
+    };
+
+    // Outfits: the same per-account mapping, with an extra identity key.
+    // Outfit ids, like item ids, belong to whoever exported them, so an
+    // unowned document outfit normally gets a fresh uuid - but a re-import
+    // of the same document must not double the wardrobe, so an outfit that
+    // matches one the caller already has (same date, notes and item set)
+    // maps onto it instead.
+    let owned_outfits: Vec<(Uuid,)> = if outfit_uuids.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as("SELECT id FROM outfits WHERE user_id = $1 AND id = ANY($2::uuid[])")
+            .bind(user_id)
+            .bind(&outfit_uuids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let owned_outfits_set: std::collections::HashSet<Uuid> =
+        owned_outfits.into_iter().map(|(id,)| id).collect();
+    let existing_outfits: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"SELECT o.id, to_char(o.date, 'YYYY-MM-DD'), o.notes
+           FROM outfits o WHERE o.user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let existing_links: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"SELECT oi.outfit_id, oi.clothing_item_id
+           FROM "outfit-items" oi JOIN outfits o ON o.id = oi.outfit_id
+           WHERE o.user_id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Identity key: (date, notes, item set) -> row id. Consumed as matches
+    // are made, so two document outfits with the same key only fold into
+    // one existing row if the document itself carries that many.
+    let mut outfit_identity: HashMap<(String, Option<String>, Vec<Uuid>), Uuid> = HashMap::new();
+    for (id, date, notes) in &existing_outfits {
+        let mut items: Vec<Uuid> = existing_links
+            .iter()
+            .filter(|(outfit_id, _)| outfit_id == id)
+            .map(|(_, item_id)| *item_id)
+            .collect();
+        items.sort();
+        outfit_identity.insert(
+            (date.clone().unwrap_or_default(), notes.clone(), items),
+            *id,
+        );
+    }
+    let mut outfit_map: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut new_outfits: Vec<JsonValue> = Vec::with_capacity(req.outfits.len());
+    for o in &req.outfits {
+        let doc_id = Uuid::parse_str(&o.id).unwrap(); // validated above
+        let (local, already_owned) = if owned_outfits_set.contains(&doc_id) {
+            (doc_id, true)
+        } else {
+            let mut items: Vec<Uuid> = o
+                .item_ids
+                .iter()
+                .map(|item_id| item_map[&Uuid::parse_str(item_id).unwrap()])
+                .collect();
+            items.sort();
+            match outfit_identity.remove(&(
+                o.date.clone().unwrap_or_default(),
+                o.notes.clone(),
+                items,
+            )) {
+                Some(id) => (id, true),
+                None => (Uuid::new_v4(), false),
+            }
+        };
+        outfit_map.insert(doc_id, local);
+        if already_owned {
+            continue;
+        }
+        let image_path = o
+            .image_path
+            .as_deref()
+            .filter(|p| !p.is_empty() && object_path_within_user(extract_object_path(p), &user_id));
+        new_outfits.push(json!({
+            "id": local.to_string(),
+            "date": o.date,
+            "notes": o.notes,
+            "image_path": image_path,
+            "is_active": o.is_active,
+            "created_at": o.created_at,
+            "updated_at": o.updated_at,
+        }));
+    }
+    let outfits_inserted: Vec<(Uuid,)> = if new_outfits.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as(
+            r#"WITH rows AS (
+                SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(
+                    id uuid, date timestamptz, notes text, image_path text,
+                    is_active bool, created_at timestamptz, updated_at timestamptz)
+            )
+            INSERT INTO outfits (id, user_id, date, notes, image_path, is_active, created_at, updated_at)
+            SELECT r.id, $2, r.date, r.notes, r.image_path,
+                   COALESCE(r.is_active, true), COALESCE(r.created_at, now()), COALESCE(r.updated_at, now())
+            FROM rows r
+            RETURNING id"#,
+        )
+        .bind(JsonValue::Array(new_outfits))
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not import outfits: {e}")))?
+    };
+
+    // Links: one flat statement over every outfit, translated through the
+    // per-account maps, deduped on the unique pair.
+    let mut links: Vec<JsonValue> = vec![];
+    for o in &req.outfits {
+        let outfit_local = outfit_map[&Uuid::parse_str(&o.id).unwrap()].to_string();
+        for item_id in &o.item_ids {
+            let item_local = item_map[&Uuid::parse_str(item_id).unwrap()].to_string();
+            links.push(json!({ "outfit_id": &outfit_local, "clothing_item_id": item_local }));
+        }
+    }
+    let links_added: i64 = match links.is_empty() {
+        true => 0,
+        false => {
+            let rows: Vec<(Uuid,)> = sqlx::query_as(
+                r#"WITH rows AS (
+                    SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(outfit_id uuid, clothing_item_id uuid)
+                )
+                INSERT INTO "outfit-items" (outfit_id, clothing_item_id)
+                SELECT r.outfit_id, r.clothing_item_id FROM rows r
+                ON CONFLICT (outfit_id, clothing_item_id) DO NOTHING
+                RETURNING outfit_id"#,
+            )
+            .bind(JsonValue::Array(links))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not import outfit links: {e}")))?;
+            rows.len() as i64
+        }
+    };
+
+    // Wear counts are derived data: recompute them for every caller item from
+    // the outfit links, so an import (and any historical churn) leaves the
+    // counts exactly right.
+    sqlx::query(
+        r#"UPDATE "clothing-items" ci
+           SET wear_count = COALESCE((
+                   SELECT count(*) FROM "outfit-items" oi
+                   JOIN outfits o ON o.id = oi.outfit_id
+                   WHERE oi.clothing_item_id = ci.id AND o.user_id = $1
+               ), 0),
+               updated_at = now()
+           WHERE ci.user_id = $1"#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not normalise wear counts: {e}"),
+        )
+    })?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "items_imported": items_inserted.len(),
+        "outfits_imported": outfits_inserted.len(),
+        "links_added": links_added,
+        "colors_created": colors_created,
+        "categories_created": categories_created,
+        "subcategories_created": subcategories_created,
+        "brands_created": brands_created,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -799,6 +2569,209 @@ pub async fn delete_outfit(
         Some(r) => Ok(Json(r.0)),
         None => Err((StatusCode::NOT_FOUND, "outfit not found".into())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateOutfitRequest {
+    pub date: String,
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub item_ids: Vec<String>,
+    pub image_path: Option<String>,
+}
+
+/// Edit a logged outfit in place: date, notes, photo, and the item set, with
+/// the wear counts of gained/lost garments adjusted in the same transaction
+/// that changes the links. Without this the only way to fix a mis-logged
+/// outfit was delete + recreate, which churns the counts and breaks the
+/// "wear history" semantics.
+pub async fn update_outfit(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user_id): AuthUser,
+    Path(outfit_id): Path<String>,
+    Json(req): Json<UpdateOutfitRequest>,
+) -> Result<Json<JsonValue>, (StatusCode, String)> {
+    let outfit_uuid = Uuid::parse_str(&outfit_id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "outfit not found".into()))?;
+    if let Some(ref path) = req.image_path {
+        validate_image_path(&serde_json::to_value(path).unwrap(), &user_id)?;
+    }
+
+    // Resolve and dedupe the named items before building any SQL, exactly as
+    // create_outfit does: the statement below carries uuids this server
+    // produced, never text the client chose.
+    if req.item_ids.len() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "an outfit cannot carry more than 200 items".to_string(),
+        ));
+    }
+    let mut item_uuids: Vec<Uuid> = vec![];
+    for raw_id in &req.item_ids {
+        match Uuid::parse_str(raw_id) {
+            Err(_) => return Err((StatusCode::BAD_REQUEST, "item id is not a uuid".to_string())),
+            Ok(item_uuid) => {
+                if !item_uuids.contains(&item_uuid) {
+                    item_uuids.push(item_uuid);
+                }
+            }
+        }
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Lock the row scoped to the caller before reading its links: a
+    // concurrent edit or delete of the same outfit cannot slip between the
+    // read and the write, and a foreign (or missing) outfit answers a 404
+    // before anything is written.
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM outfits WHERE id = $1 AND user_id = $2 FOR UPDATE")
+            .bind(outfit_uuid)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if row.is_none() {
+        return Err((StatusCode::NOT_FOUND, "outfit not found".into()));
+    }
+
+    // Ownership gate for the new item set, run before anything is written:
+    // the outfit may only link garments the caller owns.
+    if !item_uuids.is_empty() {
+        let owned: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM \"clothing-items\" WHERE user_id = $1 AND id = ANY($2::uuid[])",
+        )
+        .bind(user_id)
+        .bind(&item_uuids)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if owned.0 != item_uuids.len() as i64 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "every item in an outfit must belong to you".to_string(),
+            ));
+        }
+    }
+
+    // Diff the requested item set against the links the outfit currently has.
+    let current: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT clothing_item_id FROM \"outfit-items\" WHERE outfit_id = $1")
+            .bind(outfit_uuid)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let current_set: std::collections::HashSet<Uuid> =
+        current.into_iter().map(|(id,)| id).collect();
+    let new_set: std::collections::HashSet<Uuid> = item_uuids.iter().copied().collect();
+    let added: Vec<Uuid> = new_set.difference(&current_set).copied().collect();
+    let removed: Vec<Uuid> = current_set.difference(&new_set).copied().collect();
+
+    sqlx::query(
+        "UPDATE outfits SET date = $2::timestamptz, notes = $3, image_path = $4, updated_at = now() \
+         WHERE id = $1 AND user_id = $5",
+    )
+    .bind(outfit_uuid)
+    .bind(&req.date)
+    .bind(&req.notes)
+    .bind(&req.image_path)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("could not update outfit: {e}")))?;
+
+    if !added.is_empty() {
+        let pairs: Vec<String> = added
+            .iter()
+            .map(|u| format!("($1::uuid, '{}')", u))
+            .collect();
+        let link_sql = format!(
+            "INSERT INTO \"outfit-items\" (outfit_id, clothing_item_id) VALUES {}",
+            pairs.join(", ")
+        );
+        sqlx::query(sqlx::AssertSqlSafe(link_sql.as_str()))
+            .bind(outfit_uuid.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("could not link items: {e}"),
+                )
+            })?;
+    }
+    if !removed.is_empty() {
+        sqlx::query("DELETE FROM \"outfit-items\" WHERE outfit_id = $1 AND clothing_item_id = ANY($2::uuid[])")
+            .bind(outfit_uuid)
+            .bind(&removed)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("could not unlink items: {e}")))?;
+    }
+
+    // Wear counts follow the links: gained garments go up, lost garments down
+    // (floored at 0, exactly like delete_outfit), in the same transaction.
+    if !added.is_empty() {
+        sqlx::query(
+            "UPDATE \"clothing-items\" ci \
+             SET wear_count = COALESCE(ci.wear_count, 0) + 1, updated_at = now() \
+             FROM (SELECT u.clothing_item_id FROM unnest($1::uuid[]) AS u(clothing_item_id)) s \
+             WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
+        )
+        .bind(&added)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not update wear counts: {e}"),
+            )
+        })?;
+    }
+    if !removed.is_empty() {
+        sqlx::query(
+            "UPDATE \"clothing-items\" ci \
+             SET wear_count = GREATEST(COALESCE(ci.wear_count, 0) - 1, 0), updated_at = now() \
+             FROM (SELECT u.clothing_item_id FROM unnest($1::uuid[]) AS u(clothing_item_id)) s \
+             WHERE ci.id = s.clothing_item_id AND ci.user_id = $2",
+        )
+        .bind(&removed)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not update wear counts: {e}"),
+            )
+        })?;
+    }
+
+    // Read the edited outfit back from inside the same transaction, so the
+    // links above are already visible to it.
+    let created_sql = format!("{OUTFITS_ROW_EXPR} {OUTFITS_FROM_SCOPED} AND o.id = $2::uuid");
+    let updated: (JsonValue,) = sqlx::query_as(sqlx::AssertSqlSafe(created_sql.as_str()))
+        .bind(user_id)
+        .bind(outfit_uuid.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read back the outfit: {e}"),
+            )
+        })?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(updated.0))
 }
 
 pub async fn sync_discord_outfits(
