@@ -27,7 +27,7 @@ PSQL() {
     docker run --rm postgres:16-alpine psql "$DATABASE_URL" "$@"
 }
 
-REPO_ROOT="$(cd .. && pwd)"
+REPO_ROOT="$(cd ../.. && pwd)"
 MIGRATIONS="$REPO_ROOT/supabase/migrations"
 SEED_FILE="$REPO_ROOT/infra/compose/seeded-migrations.txt"
 
